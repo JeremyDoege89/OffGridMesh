@@ -55,10 +55,15 @@ class CodecTest {
     }
 
     @Test fun presenceRoundTripWithOptionalFields() {
-        val p = Presence(id, "Maya", 99L, batteryPct = 54)
-        val env = WireCodec.presenceEnvelope(p)
-        assertEquals(p, WireCodec.decodePresence(WireCodec.decode(WireCodec.encode(env))!!.payload))
-        assertEquals(Presence(id, "Maya", 99L), WireCodec.decodePresence(WireCodec.encode(WireCodec.presenceEnvelope(Presence(id, "Maya", 99L))).let { WireCodec.decode(it)!!.payload }))
+        val full = Presence(id, "Maya", 99L, batteryPct = 54)
+        assertEquals(full, WireCodec.decodePresence(WireCodec.encodePayload(full)))
+        val bare = Presence(id, "Maya", 99L)
+        assertEquals(bare, WireCodec.decodePresence(WireCodec.encodePayload(bare)))
+    }
+
+    @Test fun relaysFieldIsOptionalOnTheWire() {
+        val env = Envelope(ObjectType.MESSAGE, "m", "s", 1L, 2, byteArrayOf(), relays = 4)
+        assertEquals(4, WireCodec.decode(WireCodec.encode(env))!!.relays)
     }
 
     @Test fun garbageNeverThrows() {

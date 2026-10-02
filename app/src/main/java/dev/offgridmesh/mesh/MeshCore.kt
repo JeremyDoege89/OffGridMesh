@@ -1,8 +1,6 @@
 package dev.offgridmesh.mesh
 
-import dev.offgridmesh.sync.ObjectType
-import dev.offgridmesh.sync.Presence
-import dev.offgridmesh.sync.WireCodec
+import dev.offgridmesh.sync.PeerLink
 import dev.offgridmesh.transport.MeshTransport
 import dev.offgridmesh.transport.PeerInfo
 import dev.offgridmesh.transport.TransportEvent
@@ -39,9 +37,15 @@ fun interface NodeSink {
     suspend fun recordContact(deviceId: String, displayName: String, seenAtMs: Long, hopCount: Int, batteryPct: Int?)
 }
 
+/** What sits above the connection layer: SyncEngine in the app. */
+interface MeshListener {
+    suspend fun onConnected(endpointId: String)
+    suspend fun onReceived(endpointId: String, bytes: ByteArray)
+}
+
 /**
- * Transport-agnostic connection manager: decides who to connect to, keeps the endpoint set, and runs
- * presence beacons. MeshService owns one per mesh session.
+ * Transport-agnostic connection manager: decides who to connect to and keeps the endpoint set. Payloads
+ * go to [listener]; MeshService owns one per mesh session.
  *
  * Confined to the single thread of [scope] (the service's main-thread scope; the test dispatcher in
  * tests) — state is read-modify-written without locks on that assumption.
@@ -51,8 +55,9 @@ class MeshCore(
     private val nodes: NodeSink,
     private val scope: CoroutineScope,
     private val clock: () -> Long = System::currentTimeMillis,
-    private val batteryPct: () -> Int? = { null },
-) {
+) : PeerLink {
+    var listener: MeshListener? = null
+
     private val _state = MutableStateFlow(MeshState())
     val state: StateFlow<MeshState> = _state.asStateFlow()
 
@@ -73,12 +78,6 @@ class MeshCore(
                     maintain()
                 }
             },
-            scope.launch {
-                while (isActive) {
-                    delay(MeshConfig.PRESENCE_INTERVAL_MS)
-                    peers.values.filter { it.connected }.forEach { sendPresence(it.endpointId) }
-                }
-            },
         )
         transport.start(self)
     }
@@ -91,11 +90,16 @@ class MeshCore(
         _state.value = MeshState(running = false)
     }
 
-    /** Updates the advertised name for the next session and tells connected peers now. */
+    /** Name used in connection requests from now on (adverts pick it up next session). */
     fun rename(displayName: String) {
-        val me = self ?: return
-        self = me.copy(displayName = displayName)
-        peers.values.filter { it.connected }.forEach { sendPresence(it.endpointId) }
+        self = self?.copy(displayName = displayName)
+    }
+
+    override fun connectedPeers(): Map<String, String?> =
+        peers.values.filter { it.connected }.associate { it.endpointId to it.info?.deviceId }
+
+    override fun send(endpointId: String, bytes: ByteArray) {
+        if (peers[endpointId]?.connected == true) transport.send(endpointId, bytes)
     }
 
     private fun put(p: Peer) {
@@ -128,7 +132,7 @@ class MeshCore(
                 val info = p.info ?: e.info
                 put(p.copy(info = info, connected = true, connecting = false))
                 info?.let { nodes.recordContact(it.deviceId, it.displayName, now, hopCount = 0, batteryPct = null) }
-                sendPresence(e.endpointId)
+                listener?.onConnected(e.endpointId)
             }
 
             is TransportEvent.ConnectFailed -> {
@@ -145,21 +149,7 @@ class MeshCore(
                 }
             }
 
-            is TransportEvent.Received -> onReceived(e.endpointId, e.bytes, now)
-        }
-    }
-
-    private suspend fun onReceived(endpointId: String, bytes: ByteArray, now: Long) {
-        val env = WireCodec.decode(bytes) ?: return
-        when (env.objectType) {
-            ObjectType.PRESENCE -> {
-                val pr = WireCodec.decodePresence(env.payload) ?: return
-                if (pr.deviceId == self?.deviceId) return
-                // M1 presence is direct-only (ttl 0), so the sender is the endpoint it arrived from.
-                peers[endpointId]?.let { put(it.copy(info = PeerInfo(pr.deviceId, pr.displayName))) }
-                nodes.recordContact(pr.deviceId, pr.displayName, now, hopCount = 0, batteryPct = pr.batteryPct)
-            }
-            else -> Unit // M2+: SyncEngine takes messages, pins, checklists and status.
+            is TransportEvent.Received -> listener?.onReceived(e.endpointId, e.bytes)
         }
     }
 
@@ -183,11 +173,5 @@ class MeshCore(
         if (!initiate) return
         put(p.copy(connecting = true, lastAttemptMs = now))
         transport.connect(endpointId)
-    }
-
-    private fun sendPresence(endpointId: String) {
-        val me = self ?: return
-        val presence = Presence(me.deviceId, me.displayName, clock(), batteryPct())
-        transport.send(endpointId, WireCodec.encode(WireCodec.presenceEnvelope(presence)))
     }
 }

@@ -11,7 +11,20 @@ object MeshConfig {
     /** Default relay TTL (§3.4); Settings allows 1..5 from M2. */
     const val DEFAULT_TTL_HOPS = 3
 
-    /** How often a presence beacon goes to every connected endpoint. */
+    /** Settings range for the relay TTL. */
+    val TTL_RANGE = 1..5
+
+    /** Gossip records (and so the dedup memory and relay queue) are kept this long (§5.6 seen-ID cache). */
+    const val GOSSIP_RETENTION_MS = 7L * 24 * 60 * 60_000
+
+    /** Inventory sent on connect: newest relayable records only, in pages that fit one Nearby BYTES payload. */
+    const val INVENTORY_MAX_ENTRIES = 2_000
+    const val INVENTORY_PAGE = 400
+
+    /** Timestamps further ahead of the receiver's clock than this are clamped (§5.6 clock skew). */
+    const val MAX_FUTURE_SKEW_MS = 24L * 60 * 60_000
+
+    /** How often this device originates a presence beacon (relayed like any object). */
     const val PRESENCE_INTERVAL_MS = 60_000L
 
     /** How often MeshCore re-evaluates pending connections. */

@@ -107,8 +107,7 @@ fun MeshScreen(onOpenSettings: () -> Unit, vm: MeshViewModel = viewModel()) {
 
     val running = ui.mesh.running
     val direct = ui.mesh.connectedDeviceIds
-    val viaRelay = ui.nodes.count { it.deviceId !in direct && it.hopCount > 0 && now - it.lastSeenMs < MeshConfig.OFFLINE_AFTER_MS }
-    val total = direct.size + viaRelay
+    val acct = nodeAccounting(ui.mesh, ui.nodes, now)
 
     Column(Modifier.fillMaxSize()) {
         TopAppBar(
@@ -139,7 +138,7 @@ fun MeshScreen(onOpenSettings: () -> Unit, vm: MeshViewModel = viewModel()) {
                                 fontWeight = FontWeight.Bold,
                             )
                             Text(
-                                if (running) "$total nodes — ${direct.size} direct, $viaRelay via relay"
+                                if (running) "${acct.total} nodes — ${acct.direct} direct, ${acct.viaRelay} via relay"
                                 else "Turn on to find and relay for your team.",
                             )
                         }

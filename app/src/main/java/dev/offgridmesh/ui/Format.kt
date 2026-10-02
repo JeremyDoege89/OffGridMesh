@@ -16,3 +16,20 @@ fun hopLabel(hops: Int): String = when (hops) {
     1 -> "via 1 relay"
     else -> "via $hops relays"
 }
+
+data class NodeAccounting(val direct: Int, val viaRelay: Int) {
+    val total get() = direct + viaRelay
+}
+
+/** "N nodes — X direct, Y via relay" (§9): direct = connected now; relay = heard via relay recently. */
+fun nodeAccounting(
+    mesh: dev.offgridmesh.mesh.MeshState,
+    nodes: List<dev.offgridmesh.data.Node>,
+    now: Long,
+): NodeAccounting {
+    val direct = mesh.connectedDeviceIds
+    val viaRelay = nodes.count {
+        it.deviceId !in direct && it.hopCount > 0 && now - it.lastSeenMs < dev.offgridmesh.mesh.MeshConfig.OFFLINE_AFTER_MS
+    }
+    return NodeAccounting(direct.size, viaRelay)
+}

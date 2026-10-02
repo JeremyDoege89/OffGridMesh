@@ -7,4 +7,5 @@
     <string name="notif_title">Mesh active — %1$d nearby</string>
     <string name="notif_text">Relaying for your team. Tap Stop to turn the mesh off.</string>
     <string name="notif_stop">Stop</string>
+    <string name="channel_messages">Team messages</string>
 </resources>

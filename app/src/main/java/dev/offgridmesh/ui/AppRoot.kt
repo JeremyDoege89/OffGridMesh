@@ -35,7 +35,7 @@ enum class Tab(val label: String, val icon: ImageVector) {
 }
 
 @Composable
-fun AppRoot() {
+fun AppRoot(requestedTab: Tab? = null, onTabConsumed: () -> Unit = {}) {
     val app = LocalContext.current.applicationContext as MeshApp
     LaunchedEffect(Unit) { app.identity.ensureDeviceId() }
     val identity by app.identity.identity.collectAsStateWithLifecycle(initialValue = null)
@@ -50,6 +50,13 @@ fun AppRoot() {
 
     var tab by rememberSaveable { mutableStateOf(Tab.MESH) }
     var settings by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(requestedTab) {
+        if (requestedTab != null) {
+            tab = requestedTab
+            settings = false
+            onTabConsumed()
+        }
+    }
     if (settings) {
         SettingsScreen(onBack = { settings = false }, onPreTripSetup = { settings = false; rerunSetup = true })
         return
@@ -73,7 +80,7 @@ fun AppRoot() {
         Box(Modifier.fillMaxSize().padding(padding)) {
             when (tab) {
                 Tab.MESH -> MeshScreen(onOpenSettings = { settings = true })
-                Tab.CHAT -> ComingSoon("Chat", "Group chat with store-and-forward relay arrives in milestone M2.")
+                Tab.CHAT -> ChatScreen()
                 Tab.MAP -> ComingSoon("Map", "Offline maps and pins arrive in milestone M3.")
                 Tab.TASKS -> ComingSoon("Tasks", "Shared checklists arrive in milestone M4.")
                 Tab.STATUS -> ComingSoon("Status", "The OK / Need help board arrives in milestone M4.")

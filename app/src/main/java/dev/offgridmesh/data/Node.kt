@@ -28,6 +28,9 @@ interface NodeDao {
     @Query("SELECT * FROM node WHERE deviceId = :deviceId")
     suspend fun get(deviceId: String): Node?
 
+    @Query("SELECT deviceId FROM node WHERE lastSeenMs >= :sinceMs AND deviceId != :selfId")
+    suspend fun recentIds(sinceMs: Long, selfId: String): List<String>
+
     @Upsert
     suspend fun upsert(node: Node)
 

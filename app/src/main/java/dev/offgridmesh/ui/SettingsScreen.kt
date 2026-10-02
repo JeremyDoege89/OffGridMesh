@@ -19,6 +19,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -35,9 +36,11 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.offgridmesh.BuildConfig
 import dev.offgridmesh.MeshApp
 import dev.offgridmesh.data.IdentityStore
+import dev.offgridmesh.mesh.MeshConfig
+import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 
-/** Settings (§7.8). M1 carries name, pre-trip setup and About; TTL, packs, export etc. land with their milestones. */
+/** Settings (§7.8). Packs, export etc. land with their milestones. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(onBack: () -> Unit, onPreTripSetup: () -> Unit) {
@@ -71,6 +74,20 @@ fun SettingsScreen(onBack: () -> Unit, onPreTripSetup: () -> Unit) {
                 enabled = name.isNotBlank() && name.trim() != saved,
                 modifier = Modifier.heightIn(min = 48.dp),
             ) { Text("Save name") }
+
+            HorizontalDivider()
+            val ttl by app.settings.ttlHops.collectAsStateWithLifecycle(initialValue = MeshConfig.DEFAULT_TTL_HOPS)
+            Text("Relay hops (TTL): $ttl", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "How many phone-to-phone hops your messages may travel. More hops reach further but cost every " +
+                    "relay battery. Default ${MeshConfig.DEFAULT_TTL_HOPS}.",
+            )
+            Slider(
+                value = ttl.toFloat(),
+                onValueChange = { v -> scope.launch { app.settings.setTtlHops(v.roundToInt()) } },
+                valueRange = MeshConfig.TTL_RANGE.first.toFloat()..MeshConfig.TTL_RANGE.last.toFloat(),
+                steps = MeshConfig.TTL_RANGE.last - MeshConfig.TTL_RANGE.first - 1,
+            )
 
             HorizontalDivider()
             OutlinedButton(onClick = onPreTripSetup, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {

@@ -1,0 +1,193 @@
+package dev.offgridmesh.mesh
+
+import dev.offgridmesh.sync.ObjectType
+import dev.offgridmesh.sync.Presence
+import dev.offgridmesh.sync.WireCodec
+import dev.offgridmesh.transport.MeshTransport
+import dev.offgridmesh.transport.PeerInfo
+import dev.offgridmesh.transport.TransportEvent
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+
+/** One radio endpoint as MeshCore tracks it. Endpoint ids are per-session; deviceId is the stable identity. */
+data class Peer(
+    val endpointId: String,
+    val info: PeerInfo?,
+    val discoveredAtMs: Long,
+    val connected: Boolean = false,
+    val connecting: Boolean = false,
+    val lastAttemptMs: Long = 0L,
+)
+
+data class MeshState(
+    val running: Boolean = false,
+    val peers: Map<String, Peer> = emptyMap(),
+) {
+    val connectedDeviceIds: Set<String>
+        get() = peers.values.filter { it.connected }.mapNotNullTo(mutableSetOf()) { it.info?.deviceId }
+    val connectedCount: Int get() = connectedDeviceIds.size
+}
+
+/** Where MeshCore records who it has heard from (the Node table in the app, a fake in tests). */
+fun interface NodeSink {
+    suspend fun recordContact(deviceId: String, displayName: String, seenAtMs: Long, hopCount: Int, batteryPct: Int?)
+}
+
+/**
+ * Transport-agnostic connection manager: decides who to connect to, keeps the endpoint set, and runs
+ * presence beacons. MeshService owns one per mesh session.
+ *
+ * Confined to the single thread of [scope] (the service's main-thread scope; the test dispatcher in
+ * tests) — state is read-modify-written without locks on that assumption.
+ */
+class MeshCore(
+    private val transport: MeshTransport,
+    private val nodes: NodeSink,
+    private val scope: CoroutineScope,
+    private val clock: () -> Long = System::currentTimeMillis,
+    private val batteryPct: () -> Int? = { null },
+) {
+    private val _state = MutableStateFlow(MeshState())
+    val state: StateFlow<MeshState> = _state.asStateFlow()
+
+    private var self: PeerInfo? = null
+    private var jobs: List<Job> = emptyList()
+
+    private val peers get() = _state.value.peers
+
+    fun start(self: PeerInfo) {
+        if (_state.value.running) return
+        this.self = self
+        _state.value = MeshState(running = true)
+        jobs = listOf(
+            scope.launch { transport.events.collect { handle(it) } },
+            scope.launch {
+                while (isActive) {
+                    delay(MeshConfig.MAINTENANCE_TICK_MS)
+                    maintain()
+                }
+            },
+            scope.launch {
+                while (isActive) {
+                    delay(MeshConfig.PRESENCE_INTERVAL_MS)
+                    peers.values.filter { it.connected }.forEach { sendPresence(it.endpointId) }
+                }
+            },
+        )
+        transport.start(self)
+    }
+
+    fun stop() {
+        if (!_state.value.running) return
+        jobs.forEach { it.cancel() }
+        jobs = emptyList()
+        transport.stop()
+        _state.value = MeshState(running = false)
+    }
+
+    /** Updates the advertised name for the next session and tells connected peers now. */
+    fun rename(displayName: String) {
+        val me = self ?: return
+        self = me.copy(displayName = displayName)
+        peers.values.filter { it.connected }.forEach { sendPresence(it.endpointId) }
+    }
+
+    private fun put(p: Peer) {
+        _state.value = _state.value.copy(peers = peers + (p.endpointId to p))
+    }
+
+    private fun remove(endpointId: String) {
+        _state.value = _state.value.copy(peers = peers - endpointId)
+    }
+
+    internal suspend fun handle(e: TransportEvent) {
+        if (!_state.value.running) return
+        val now = clock()
+        when (e) {
+            is TransportEvent.Discovered -> {
+                val info = e.info ?: return // not ours or incompatible version: ignore, never connect
+                if (info.deviceId == self?.deviceId) return
+                put(peers[e.endpointId]?.copy(info = info) ?: Peer(e.endpointId, info, discoveredAtMs = now))
+                nodes.recordContact(info.deviceId, info.displayName, now, hopCount = 0, batteryPct = null)
+                maybeConnect(e.endpointId, now)
+            }
+
+            is TransportEvent.Lost -> {
+                val p = peers[e.endpointId] ?: return
+                if (!p.connected && !p.connecting) remove(e.endpointId)
+            }
+
+            is TransportEvent.Connected -> {
+                val p = peers[e.endpointId] ?: Peer(e.endpointId, e.info, discoveredAtMs = now)
+                val info = p.info ?: e.info
+                put(p.copy(info = info, connected = true, connecting = false))
+                info?.let { nodes.recordContact(it.deviceId, it.displayName, now, hopCount = 0, batteryPct = null) }
+                sendPresence(e.endpointId)
+            }
+
+            is TransportEvent.ConnectFailed -> {
+                val p = peers[e.endpointId] ?: return
+                put(p.copy(connecting = false))
+            }
+
+            is TransportEvent.Disconnected -> {
+                // Endpoint ids don't survive a reconnect reliably; forget it and let fresh discovery
+                // report the peer again if it is still in range.
+                if (e.endpointId in peers) {
+                    remove(e.endpointId)
+                    transport.refreshDiscovery()
+                }
+            }
+
+            is TransportEvent.Received -> onReceived(e.endpointId, e.bytes, now)
+        }
+    }
+
+    private suspend fun onReceived(endpointId: String, bytes: ByteArray, now: Long) {
+        val env = WireCodec.decode(bytes) ?: return
+        when (env.objectType) {
+            ObjectType.PRESENCE -> {
+                val pr = WireCodec.decodePresence(env.payload) ?: return
+                if (pr.deviceId == self?.deviceId) return
+                // M1 presence is direct-only (ttl 0), so the sender is the endpoint it arrived from.
+                peers[endpointId]?.let { put(it.copy(info = PeerInfo(pr.deviceId, pr.displayName))) }
+                nodes.recordContact(pr.deviceId, pr.displayName, now, hopCount = 0, batteryPct = pr.batteryPct)
+            }
+            else -> Unit // M2+: SyncEngine takes messages, pins, checklists and status.
+        }
+    }
+
+    internal fun maintain() {
+        val now = clock()
+        for (p in peers.values) {
+            if (p.connecting && now - p.lastAttemptMs >= MeshConfig.CONNECT_TIMEOUT_MS) {
+                put(p.copy(connecting = false))
+            }
+            maybeConnect(p.endpointId, now)
+        }
+    }
+
+    private fun maybeConnect(endpointId: String, now: Long) {
+        val p = peers[endpointId] ?: return
+        val info = p.info ?: return
+        val me = self ?: return
+        if (p.connected || p.connecting) return
+        if (p.lastAttemptMs != 0L && now - p.lastAttemptMs < MeshConfig.RETRY_BACKOFF_MS) return
+        val initiate = me.deviceId < info.deviceId || now - p.discoveredAtMs >= MeshConfig.CONNECT_FALLBACK_MS
+        if (!initiate) return
+        put(p.copy(connecting = true, lastAttemptMs = now))
+        transport.connect(endpointId)
+    }
+
+    private fun sendPresence(endpointId: String) {
+        val me = self ?: return
+        val presence = Presence(me.deviceId, me.displayName, clock(), batteryPct())
+        transport.send(endpointId, WireCodec.encode(WireCodec.presenceEnvelope(presence)))
+    }
+}

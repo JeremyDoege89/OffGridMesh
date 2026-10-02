@@ -1,0 +1,406 @@
+Off-Grid Mesh Workspace
+Build Guide
+Zero-infrastructure field coordination for Android: mesh text, offline-map pins,shared checklists, and team status — with no cell service, no server, and no accounts.
+Build spec for implementation  •  2026-10-01
+Read this first: This guide is for the engineer or coding agent building the app. It makes the transport decision up front (Section 3) because that decision determines whether this ships in weeks or dies in protocol debugging. Every range number is a field-test-and-tune rule of thumb; Section 14 replaces them with measured values. "Hundreds of yards" means multi-hop relay in open terrain, never one hop.
+Do not ship without this: Emulators cannot test this app. Budget for 3+ physical Android devices from M1 onward. A build that "works in the emulator" has tested nothing that matters.
+Contents
+1. Product thesis &amp; audience
+2. Monetization model and the revenue math
+3. Transport reality — read this before writing any code
+4. Architecture
+5. Data model
+6. Offline maps
+7. Screens &amp; navigation
+8. MVP scope and explicit v2 cuts
+9. UX requirements — communicate mesh reality
+10. Privacy &amp; security
+11. Play Billing implementation notes
+12. ASO starter
+13. Build milestones M1–M5
+14. Testing checklist
+15. Open decisions
+Appendix A: Screen inventory checklist
+Appendix B: Message envelope &amp; sync rules
+Appendix C: Risk register
+1. Product thesis &amp; audience
+When cell service disappears — hurricane, wildfire, tower saturation at a festival, or a job site beyond coverage — coordination does not degrade, it vanishes. Group texts queue forever; cloud checklists spin. What remains is either text-only peer-to-peer chat toys or military mesh systems nobody has in their truck. The gap is a local shared workspace: short text updates, pins on a pre-downloaded map, a crew checklist, and a status board that answers "is everyone okay?"
+This app fills that gap on phones people already carry. Android-only, proudly: Android permits the background Bluetooth scanning, Wi-Fi Direct groups, and persistent foreground service a mesh needs; iOS restricts all three. Audience: CERT/disaster-response volunteers, remote construction and field crew leads, festival/event organizers, overland groups, and search-and-rescue-adjacent teams. They plan before they lose signal, pay once for a tool that works, and one-star apps that overpromise range. Honesty about radio limits is a product feature.
+Scope: four object types — messages, pins, checklists, member status — synced between nearby phones. Not a file-transfer tool, not voice, not an internet bridge.
+2. Monetization model and the revenue math
+Freemium, no ads. Ads require ad-network connectivity the app explicitly does not have in the field, and an ad SDK phoning home undermines the "no servers" privacy claim in Section 10. The paywall is a capability boundary, not a timer:
+Free: full mesh workspace with up to 8 concurrent nodes, one offline map pack, passphrase encryption. No time limit, no message cap. This is the tier that earns trust and store reviews.
+Pro (one-time, ~$9.99): unlimited nodes, additional map packs, higher TTL-hop setting, export of pins/checklists. Target buyer: the crew lead or event organizer equipping a team.
+No subscription in MVP. Field users churn subscriptions when the season ends; a one-time unlock matches the purchase psychology of this audience ("buy the tool once"). Revisit a team/org tier only if organizers ask for managed provisioning.
+Revenue math
+Target: $100/week, i.e., $5,200/year. Google Play takes 15% under the sub-$1M service-fee tier, so a $9.99 unlock nets about $8.50:
+Price point
+Net per sale
+Sales/week for $100
+$9.99 one-time
+~$8.50
+~12
+$14.99 one-time
+~$12.75
+~8
+$7.99 one-time
+~$6.80
+~15
+Twelve Pro sales a week is the planning number at $9.99. Is that realistic? The niche is small but high-intent: the buyer searches after a specific failure ("we lost comms at the site"), not while browsing. The 8-node free cap is deliberately generous for a family or small crew and deliberately binding for a 20-person event team — the organizer hits the cap during setup, which is exactly when willingness to pay peaks. One event organizer equipping a team is also worth more than the SKU price: they generate the word-of-mouth and the review that mentions a real deployment. Do not lower the free cap below 8 to chase conversion; a free tier that fails in a real emergency produces the reviews that kill the listing.
+Note: Price is an open decision (Section 15). The guide defaults to $9.99; $14.99 is defensible if M5 field tests are strong, because the comp set (offline navigation and outdoor tools) supports it.
+3. Transport reality — read this before writing any code
+This section decides whether the app ships. Read it before scaffolding anything, and do not let a later section contradict it.
+3.1 There is no BLE mesh API on Android
+Bluetooth Mesh is a specification, not an Android API. Android exposes BLE advertising, scanning, and GATT connections; it does not expose a managed mesh stack (no provisioning, no managed flooding, no friend/LPN nodes). Anything called "BLE mesh" in an Android app is hand-built on those primitives. Meanwhile, Android actively works against background radios: since Android 8, background BLE scans are throttled and batched; Doze defers network and scan work; App Standby buckets defer jobs for rarely used apps. A mesh that must run for hours in a pocket therefore requires a foreground service with a persistent notification — that notification is the price of admission, and the UX must present it as "Mesh active," not hide it.
+3.2 The transport decision: Nearby Connections for MVP
+Two paths can produce a working product. Only one can produce it this quarter:
+Nearby Connections (MVP)
+DIY BLE gossip (v2 track)
+What it is
+Play Services high-level API; abstracts BLE, Bluetooth Classic, Wi-Fi hotspot
+Hand-rolled: BLE adverts + GATT, flooding/gossip routing, dedup, ACKs
+Time to working mesh
+Days (discovery + payloads)
+Weeks–months (protocol, throttling, battery tuning)
+Dependency
+Google Play Services on every device
+None — works on de-Googled devices
+Background behavior
+Managed by Play Services; still needs foreground service for app logic
+Fully your problem: scan throttling, Doze, OEM killers
+Multi-hop
+App-level relay over connections you manage
+Native to design (flooding), but dedup storms are your problem
+Failure mode
+Play Services version quirks; opaque transport switching
+Battery drain, missed adverts, routing loops
+Recommendation: build MVP on Nearby Connections (com.google.android.gms:play-services-nearby). Say plainly in the listing and in-app what that means: "zero-infrastructure" (no tower, no router, no server) is true; "zero-Google" is false, and a device without Play Services cannot join the mesh. Put the DIY transport behind the same MeshTransport interface (Section 4) so v2 can swap it without rewriting sync. If the owner rejects the Play Services dependency, the honest consequence is a longer timeline and a smaller feature set — that trade belongs to the owner (Section 15), not to a silent architecture drift.
+3.3 Wi-Fi Direct and Wi-Fi Aware
+Wi-Fi Direct (WifiP2pManager) is real and useful as a high-bandwidth leg (map-pack side-loading between devices, future photo transfer), but it is not the mesh backbone for MVP: a device joins one group at a time, group-owner negotiation picks a single owner, formation takes seconds, and group membership is effectively a star, not a mesh. Nearby Connections already uses Wi-Fi transports opportunistically under the hood; do not build a second, parallel Wi-Fi Direct stack in MVP. Wi-Fi Aware (Neighbor Awareness Networking) would be attractive — infrastructure-less, concurrent — but handset support is spotty across price tiers; do not make MVP depend on it. Rule of thumb, field-test-and-tune: Wi-Fi Direct range ~50–150 m line-of-sight, much less indoors or in crowds. (All ranges in this guide are starting values to be replaced by Section 14 walk-test measurements.)
+3.4 Range honesty
+Per-hop reality, open terrain, phones at chest height — field-test-and-tune starting values:
+Transport leg
+Per-hop range (rule of thumb)
+Planning value
+BLE advert / connection
+30–100 m open; 5–20 m indoors/crowded
+Use 30 m for planning
+Wi-Fi Direct / hotspot leg
+50–150 m open; far less indoors
+Use 50 m for planning
+Multi-hop chain (5 hops)
+Sum of hops minus relay losses
+"Hundreds of yards" only here
+"Hundreds of yards" is only true as a chain: five people spaced 40 m apart relay across ~200 m. Every hop adds latency (seconds, not milliseconds, once store-and-forward queues drain) and a failure point (a relay walks away, a phone sleeps). The UI must therefore show hop counts (Section 9), the default TTL must be small (3 hops; setting allows 1–5), and no screenshot or listing copy may show a single hop spanning a valley. Overpromising range is the one-star-review generator for this category; the defense is a hop-count UI that teaches users to space relays.
+3.5 Background operation and permissions
+MVP requires a foreground service (type: connectedDevice / dataSync as applicable to target SDK) with a persistent "Mesh active — N nodes nearby" notification, started by an explicit user toggle and stoppable from the notification. Do not attempt to keep the mesh alive from background-only components; Doze and OEM battery killers will win, intermittently, in ways that look like app bugs. Permissions, requested in onboarding with rationale before the system dialog:
+BLUETOOTH_SCAN, BLUETOOTH_CONNECT, BLUETOOTH_ADVERTISE (API 31+; declare neverForLocation only if the build truly derives no location from scans — pin use means it does, so do not declare it).
+ACCESS_FINE_LOCATION — required for BLE scan results and Wi-Fi Direct peer discovery on API ≤32, and for pin/GPS features at all levels.
+NEARBY_WIFI_DEVICES (API 33+) for Wi-Fi Direct / Nearby Wi-Fi transports.
+POST_NOTIFICATIONS (API 33+) for the foreground-service and new-message notifications.
+Location permission denial path must still allow manual pins (tap-to-drop without GPS fix) and text/checklists over already-formed connections where the API permits; where discovery itself is permission-gated, say so in the empty state instead of showing a silent blank list.
+4. Architecture
+Stack: Kotlin, Jetpack Compose, Nearby Connections API (behind an interface), MapLibre Native for offline maps, Room as the single source of truth, DataStore for settings, WorkManager only for non-urgent housekeeping (never for mesh I/O). Minimum SDK 26; target the current SDK. No backend, no accounts, no analytics SDK that requires connectivity. Identity is local: a user-chosen display name plus a generated device ID (UUID) created on first run and stored in Room/DataStore.
+Layering — keep these boundaries clean, because the v2 DIY transport depends on them:
+MeshTransport (interface): advertise/discover, connect, send(bytes, endpointId), receive callback, endpoint lost callback. One implementation in MVP: NearbyTransport. A future DiyBleTransport implements the same interface.
+MeshService (foreground service): owns MeshTransport lifecycle, the connected-endpoint set, the relay queue, and the notification. Exposes state as StateFlow. Nothing else starts or stops radios.
+SyncEngine: owns gossip — on connect, exchange inventory summaries; on receive, dedup by ID, persist to Room, re-relay if TTL remains. Transport-agnostic; consumes MeshService flows.
+Repositories (MessageRepository, PinRepository, ChecklistRepository, StatusRepository, NodeRepository): Room-backed, expose Flows to UI. All writes go through SyncEngine-aware repository methods so local creates enter the relay queue.
+UI (Compose): stateless screens over ViewModels that observe repositories and MeshService state. UI never touches Nearby Connections directly.
+Payloads: one envelope (Appendix B) for every object type; no chunking in MVP — messages are capped, pins/deltas are small. Anything over a few KB is v2 (photos). Discovery is duty-cycled by MeshService; all duty-cycle constants live in MeshConfig for field tuning.
+5. Data model
+SQLite via Room. All timestamps are epoch milliseconds (UTC). IDs are UUID strings generated on the creating device — no autoincrement IDs anywhere, because two devices must be able to create rows offline and merge without collision. Every syncable row carries createdAtMs and updatedAtMs; deletes are tombstones (deleted flag + updatedAtMs) retained for 30 days so a delete can gossip to peers that were offline when it happened.
+5.1 Node
+The node directory: who exists, learned from discovery and from relayed presence beacons.
+Field
+Type
+Notes
+deviceId
+Text (UUID)
+Primary key. Stable per install
+displayName
+Text
+User-chosen; changeable; last-write-wins
+lastSeenMs
+Long (epoch ms)
+Updated on any direct or relayed contact
+hopCount
+Int
+0 = direct; &gt;0 via relay; display only
+batteryPct
+Int?
+Optional beacon field; omit if unavailable
+5.2 Message
+Field
+Type
+Notes
+id
+Text (UUID)
+Primary key; dedup key for gossip
+senderId
+Text
+Node.deviceId of author
+timestampMs
+Long
+Author clock; tie-break with id
+text
+Text
+Hard cap 500 chars; enforce in UI + repository
+ttlHops
+Int
+Remaining hops at creation (default 3); decremented per relay
+state
+Enum
+LOCAL_ONLY, SENDING, RELAYED, DELIVERED (see §9)
+channelId
+Text
+MVP: single group channel; column exists for v2
+5.3 Pin
+Field
+Type
+Notes
+id
+Text (UUID)
+Primary key
+lat / lng
+Double
+WGS84 decimal degrees
+label
+Text
+Required, short (≤60 chars)
+type
+Enum
+HAZARD, RALLY_POINT, RESOURCE, OTHER
+creatorId
+Text
+Node.deviceId
+createdAtMs / updatedAtMs
+Long
+Last-write-wins on edit/delete
+5.4 Checklist and ChecklistItem
+Entity.Field
+Type
+Notes
+Checklist.id / title
+Text (UUID) / Text
+Title ≤80 chars
+Checklist.updatedAtMs
+Long
+Max of item updates; for inventory summaries
+ChecklistItem.id
+Text (UUID)
+Primary key
+ChecklistItem.checklistId
+Text
+FK to Checklist.id
+ChecklistItem.text
+Text
+≤120 chars
+ChecklistItem.done
+Boolean
+The field crews actually fight over
+ChecklistItem.doneBy
+Text?
+Node.deviceId of who checked it
+ChecklistItem.updatedAtMs
+Long
+Last-write-wins per item
+5.5 MemberStatus
+Field
+Type
+Notes
+deviceId
+Text (UUID)
+Primary key; FK to Node
+status
+Enum
+OK, NEED_HELP, OFFLINE (derived if stale)
+updatedAtMs
+Long
+NEED_HELP requires explicit user set/clear
+OFFLINE is never stored as a user choice; it is derived when now − Node.lastSeenMs exceeds a threshold (default 10 minutes; field-test-and-tune). NEED_HELP is sticky: it stays until the member clears it or a peer with a newer timestamp relays a clear. Do not let a stale OK overwrite a newer NEED_HELP — timestamp comparison is the whole rule, apply it literally.
+5.6 Sync semantics
+Sync is epidemic gossip, not client-server: on any new connection, peers exchange compact inventory summaries (per-entity max updatedAtMs plus a Bloom filter or count of known message IDs for the last 7 days); each side then requests what it lacks. Every received object is deduplicated by primary-key ID (messages additionally by a seen-ID cache kept 7 days), persisted to Room, and — if ttlHops &gt; 0 and the object is a message — queued for relay with ttlHops decremented. Relay queues are priority-ordered: NEED_HELP status first, then pins, then messages, then checklist deltas; persisted across process death (the queue lives in Room, not memory), drained opportunistically whenever an endpoint is connected. That is the store-and-forward contract: a message composed out of range must send itself when a relay wanders into range, with no user action.
+Conflict rule: last-write-wins by updatedAtMs for pin edits, checklist item state, display names, and member status. State the tradeoff honestly in code comments and in the help screen: if two people edit the same checklist item while partitioned, the later timestamp wins and the earlier edit is silently lost. For checklists ("is the generator fueled?") and short field messages this is the right tradeoff — operational simplicity beats merge UX at this scale. It is the wrong tradeoff for documents, which is one more reason documents are out of scope. Clock skew is a real hazard (a phone with a wrong clock wins every conflict); mitigate by tie-breaking on (updatedAtMs, id) and by never letting a future timestamp more than 24 hours ahead win — clamp and log it.
+6. Offline maps
+Renderer: MapLibre Native (org.maplibre.gl:android-sdk or successor artifact) with a bundled minimal style (background, water, roads, labels) that renders entirely from vector or raster MBTiles. Map data: OpenStreetMap-derived MBTiles packs built ahead of time (state- or region-sized extracts; document the tilemaker/planetiler step in the repo, not in the app). The app ships with no tiles or one small demo region; real packs are downloaded in onboarding or Settings while on Wi-Fi.
+Do not ship without this: Onboarding must force the map-pack step before declaring setup complete: "Download your area map now, while you have Wi-Fi — you cannot download it in the field." A user who skips must be able to proceed (never hard-block), but the skip requires tapping an explicit "I understand I will have no map offline" confirmation, and the map screen must repeat the warning when no pack covers the current GPS position.
+Pack management: list downloaded packs with region name, size, and zoom range (suggest z10–z15 for field use; z16+ explodes pack size — label sizes as estimates and verify in M3). Store packs in app-private storage; offer delete-per-pack.
+Pins are data, not tiles: stored as rows in Room, rendered as a GeoJSON source rebuilt from the Pin repository flow. Never bake pins into MBTiles.
+Node positions: rendered from Node rows that carry a last-known lat/lng (shared voluntarily via status beacon; add lat/lng nullable fields to the beacon payload, not to the Node table's required columns). A member who disables location sharing appears in lists but not on the map — say so in Settings copy.
+Attribution: OSM/MapLibre attribution visible on the map screen. Non-negotiable for ODbL compliance.
+Fallback: if no pack covers the viewport, render a plain grid with a scale bar and pin/node markers positioned by lat/lng. A grid with correct relative pin positions is useful; a blank screen is not.
+7. Screens &amp; navigation
+Single-activity Compose app. Bottom navigation: Mesh, Chat, Map, Tasks, Status with labels always visible (no icon-only nav — gloves and sunlight). Minimum touch target 48 dp.
+7.1 Onboarding
+Four steps, completable on Wi-Fi before departure, re-runnable from Settings ("Pre-trip setup"): (1) display name; (2) permission rationale — one screen per permission group, explaining the field reason before the system dialog, with the honest sentence "Android requires the location permission for Bluetooth and Wi-Fi discovery — the app has no server to send your location to"; (3) map-pack picker with the forced-download pattern from Section 6; (4) "What this mesh can and can't do" — three can bullets (works in airplane mode with radios on, relays through teammates, keeps working with no towers) and three can't bullets (range is tens of meters per hop, phones must have the app open with Mesh active, no internet or phone-number contacts). This screen is the range-honesty defense; do not let design soften it into marketing.
+7.2 Mesh (home)
+Mesh toggle (starts/stops MeshService), node list with name, hop count ("Direct" / "via 2 relays"), last-seen, battery if beaconed. Header: "6 nodes — 4 direct, 2 via relay." Persistent banner when running with zero nodes: "Mesh active — no one in range yet."
+7.3 Chat
+Single group thread in MVP. Composer enforces 500 chars with a counter. Bubbles show state (Section 9); long-press shows detail ("Relayed via Maya, 2 hops, 3 min ago"). Offline messages show as queued — never a send-failure error. In store-and-forward, delay is the state, not failure.
+7.4 Map
+MapLibre over downloaded packs; layers: pins by type, node positions, own GPS. Tap a pin for label/creator/time; edit/delete gossips (prompt on delete). Drop-pin: GPS or long-press, pick type then label. Download-more-packs only with connectivity; offline it explains itself.
+7.5 Checklists
+Checklist list with progress ("7/12"); detail: check/uncheck, add item, "Done by Maya, 10:42" attribution. Writes are local-first and sync later — never block on a peer. Create/rename/delete in MVP; reorder is v2.
+7.6 Status board
+Roll-call of all members with OK / NEED_HELP / offline-derived state and last-seen. Own status: two buttons (I'm OK / I need help), also in the Mesh header. NEED_HELP sorts to top in red on every peer — safety feature, test explicitly (Section 14).
+7.7 Settings
+Display name; TTL hops (1–5, default 3); foreground-service behavior (auto-start off by default); location sharing toggle; map packs (download/delete, storage); export to JSON/GeoJSON file; "Pre-trip setup" re-entry; About with the honest line: "Mesh transport: Google Nearby Connections — requires Google Play Services."
+7.8 Paywall
+Triggered at the 9th node or second map pack: Free (8 nodes, 1 pack) vs Pro (unlimited nodes/packs, export), one-time price, restore action. Never interrupt an active NEED_HELP flow — defer until it clears. Do not "optimize" this away.
+8. MVP scope and explicit v2 cuts
+MVP (ship this)
+Explicitly v2 (do not build)
+Nearby Connections transport behind MeshTransport
+DIY BLE gossip transport (no Play Services)
+Group text (500 chars), store-and-forward, TTL relay
+Photo/file transfer (needs Wi-Fi Direct leg; photos over BLE are brutally slow)
+Pins (4 types) on one downloaded map pack
+True per-contact end-to-end encryption
+Shared checklists + status board
+Multi-channel / multiple workspaces
+Passphrase symmetric encryption (Section 10)
+Map-pack management: multiple regions, auto-update
+Foreground-service mesh with honest notification
+Wi-Fi Aware transport; iOS companion
+Export to local file
+Voice notes, location history trails
+The v2 list is a promise about sequencing, not a roadmap commitment. Photo transfer deserves its warning in the guide itself: a 3 MB photo over a BLE-rate leg is minutes per hop and will torch relay battery; it only becomes sane with a Wi-Fi Direct high-bandwidth leg and explicit "send when on fast link" logic. Any stakeholder who wants photos in MVP must first read this paragraph and then say so in Section 15.
+9. UX requirements — communicate mesh reality
+The central UX problem is that a mesh fails silently and slowly, while users expect SMS semantics. The interface must narrate the mesh continuously:
+Node accounting everywhere: "3 nodes in range, 2 via relay" (Mesh screen header and a compact form in Chat). Never show a bare green dot.
+Message states, three only, in plain words: Queued (on this phone, no path yet) → Relayed (handed to at least one peer; may still be traveling) → Delivered (acknowledged by the recipient device, or by all known nodes for group messages — pick the group definition: delivered when every node known at send time has ACKed, and label it "Delivered to all current members" in details). Sent is not a word this app uses; nothing is "sent" in one hop by default.
+Honest empty states: "No nodes in range — the mesh forms automatically when another member with the app comes within ~30–50 m (field-test-and-tune). Keep Mesh active." Include the range number; vagueness reads as breakage.
+Staleness is shown, not hidden: last-seen times on nodes, pins, and status ("12 min ago"); offline-derived members greyed, never removed.
+The foreground notification is a feature: "Mesh active — 4 nearby" with a Stop action. Users who swipe the app away and lose the mesh must be able to learn why from the notification's absence; onboarding says "if the notification is gone, the mesh is off."
+NEED_HELP is the loudest object in the system: red, sorted first, notified (sound/vibration subject to system settings) on receipt. Test with gloves, in sun, at arm's length.
+10. Privacy &amp; security
+Privacy posture, stated in-app and in the listing in exactly these terms: everything stays on local devices; there is no server, no account, no cloud backup performed by the app; the developer cannot see messages, pins, or locations because there is nowhere for them to go. Uninstall deletes the local database (export first — Settings offers it). The one external dependency is Google Play Services for transport (Section 3.2); disclose it, do not bury it.
+Encryption decision (pick one, label it accurately)
+MVP choice: pre-shared passphrase → symmetric encryption of payloads. The mesh creator sets a passphrase; joining requires it ("enter the team passphrase" in onboarding/join flow). Derive a key with Argon2id (or PBKDF2 at high iteration count if dependency weight matters) and encrypt every envelope payload with XSalsa20-Poly1305 (libsodium via Lazysodium) or AES-GCM via Tink — pick one library, document the construction in the repo README, and never hand-roll primitives. What this buys: casual eavesdroppers and non-member radios cannot read traffic. What it does not buy: forward secrecy, per-contact identity, or protection from anyone who learns the passphrase. Label it in-app as "Team passphrase encryption" — the strings "end-to-end encrypted" and "military-grade" are banned from UI and listing copy. The no-encryption fallback (open mesh for public events) is a legitimate secondary mode if the owner chooses it, but it must be visually distinct (open-padlock state in the Mesh header), never the silent default. True per-contact E2E (double-ratchet class) is v2 and requires an identity design this guide deliberately defers.
+11. Play Billing implementation notes
+One non-consumable in-app product (e.g., pro_unlock) via Play Billing Library (current major version at implementation time). Local entitlement only: on purchase and on app start (BillingClient queryPurchases), set isPro in DataStore; gate features at the repository/UI layer (node cap counting, map-pack count, export), never inside MeshService — a billing outage must not stop an active mesh. Handle the standard cases explicitly: purchase pending (grant on PURCHASED only), already-owned on reinstall (restore in Settings and on first paywall show), refund (entitlement revoked on next query — accept this; do not build server revocation). Test with license testers and the internal track before production; include the billing test cases in Section 14. No server-side receipt validation in MVP — note the (acceptable, low-value-target) spoofing risk in a code comment and move on.
+12. ASO starter
+Title pattern: "[Name]: Off-Grid Mesh Chat &amp; Team Coord" — keep the name short and the subtitle doing the search work; confirm character limits at submission time. Keywords to weave naturally into the full description (no stuffing): off grid messenger, mesh chat no internet, disaster communication app, offline team chat, walkie-talkie alternative for teams, no signal group chat. Description must repeat the honesty lines: works in airplane mode (Bluetooth/Wi-Fi radios on), tens of meters per hop with relay, requires Google Play Services, download maps before you go.
+Listing bullets (short description / feature list): Mesh text with relay — no towers, no Wi-Fi router; Pins &amp; shared checklists on maps you download before departure; Team status board — OK / need help at a glance; No accounts, no servers — your data never leaves the team's phones; Built for CERT, field crews, events, and overland teams.
+Screenshot plan (shoot on real devices in airplane mode, status bar visible): 1) Mesh screen mid-relay ("6 nodes — 2 via relay"); 2) Chat with delivered states; 3) Map with hazard + rally pins over a downloaded pack; 4) Status board with one NEED_HELP (staged, consented) sorted on top; 5) Onboarding honesty screen. Captions state the condition ("Shown in airplane mode"), because that claim is the differentiator and reviewers check it.
+13. Build milestones M1–M5
+Each milestone ends with acceptance criteria run on physical devices. A milestone is not done when the demo works on the developer's desk; it is done when the criteria pass in the stated conditions.
+M1: Transport proof — discovery &amp; node list
+Scope: Nearby Connections advertise/discover/connect behind MeshTransport; MeshService foreground notification; Node rows populate with lastSeen/hop=0.
+Acceptance: Two+ physical devices, airplane mode with Bluetooth/Wi-Fi on: each device lists the other within 30 s of both enabling Mesh; stopping Mesh from the notification ends discovery on both within 15 s; permission-denied device shows the Section 7 empty state, not a crash.
+M2: Mesh chat — store-and-forward with TTL &amp; states
+Scope: Message entity, gossip send/receive, seen-ID dedup, persistent relay queue, 3-hop default TTL, message-state UI.
+Acceptance: Three devices in a line (A–B–C, A out of direct range of C — verify with hop counts): message from A reaches C via B in under 60 s; killing and relaunching B mid-transit still delivers (queue persisted); duplicate delivery never renders twice; 500-char cap enforced; airplane-mode throughout.
+M3: Offline maps + pins
+Scope: MapLibre + one MBTiles pack download flow, forced onboarding step, pin CRUD with GeoJSON rendering, grid fallback.
+Acceptance: Fresh install on Wi-Fi: onboarding cannot be marked complete without a pack or the explicit no-map confirmation; in airplane mode the map renders offline with attribution, pins drop at GPS and by long-press, and a pin created on device A appears on B and C after relay sync; no-pack viewport shows the grid fallback, not a blank screen.
+M4: Checklists, status board &amp; encryption
+Scope: Checklist/Item sync with last-write-wins, MemberStatus with NEED_HELP precedence, passphrase key derivation + payload encryption, paywall gating at node 9 / pack 2.
+Acceptance: Partition test: B and C edit the same checklist item while separated; on rejoin, the later timestamp wins on all devices and doneBy is correct. NEED_HELP set on C reaches A via B and sorts first with notification. A non-member device (wrong passphrase) discovers but cannot read payloads (verify with a debug build log or second workspace). Paywall appears at the 9th node and never during an active NEED_HELP.
+M5: Battery, Doze &amp; release hardening
+Scope: Duty-cycle tuning via MeshConfig, Doze/App Standby behavior, OEM-killer documentation, export, billing edge cases, listing assets.
+Acceptance: 8-hour pocket test (mesh active, screen off, mixed Doze): devices still discover within one duty cycle of proximity; battery use reported in the test log against the Section 14 budget. Billing sandbox: buy, reinstall-restore, pending, and refund paths pass. Release checklist (Section 14) fully green on 3+ devices from at least 2 OEMs.
+14. Testing checklist
+Physical devices are the test environment. Minimum rig: 3 devices for mesh logic, 8+ for stress (borrow, buy used, or recruit the team); at least two OEMs and one low-RAM device; one device on the oldest supported API (26) if hardware allows. Every item below is a checkbox in the release gate; emulators may run Room/Compose unit tests and nothing radio-related.
+Range walk test (open field, GPS-logged): per-hop BLE and Wi-Fi-leg ranges measured at chest height; replace Section 3.4 planning values with measured medians; repeat indoors/crowded for the second set of numbers used in help copy.
+Multi-hop chain: 5 devices spaced past direct range; end-to-end delivery timed at TTL 3 and 5; relay-walks-away failure observed and message states remain truthful (no false Delivered).
+Doze/background: mesh active, screen off 1 hr+ (force Doze via adb where appropriate, then also unforced overnight); discovery resumes per M5 criterion; foreground notification never lies about mesh state.
+Airplane-mode operation: full session (discover, chat, pins, checklist, status) in airplane mode with Bluetooth/Wi-Fi manually enabled; no feature silently requires internet; map-pack download correctly disabled with explanation.
+Permission matrix: each permission denied at first ask, denied permanently, and revoked mid-session; empty states and rationale screens per Section 3.5; app never crashes on a revoked permission.
+8+ node stress: 8–12 devices, concurrent sends; dedup holds (no duplicate bubbles), battery and heat noted after 30 min, node-cap paywall triggers at 9 on free builds.
+Battery budget (field-test-and-tune starting target): mesh-active idle ≤ ~5%/hr on a mid-range device; over-budget results block release until duty cycles are retuned.
+NEED_HELP priority: set on the far end of a 3-hop chain; measure time-to-first-notification; payload jumps the relay queue ahead of queued normal messages.
+Clock-skew: set one device clock +2 days; conflicts resolve without the skewed device winning everything (Section 5.6 clamp) and timestamps render sanely.
+Billing: license-tester purchase, restore after reinstall, pending→purchased transition, refund revocation, offline purchase attempt (must fail gracefully, mesh unaffected).
+Map packs: download, delete, storage accounting; pin rendering at pack edge; grid fallback beyond pack bounds; attribution visible in screenshots.
+Data safety: export produces valid JSON/GeoJSON; uninstall/reinstall starts clean; tombstoned deletes propagate to a device that was offline for the delete.
+15. Open decisions
+Four decisions belong to the owner. Development proceeds on the stated defaults until the owner rules otherwise; silence is not a ruling — record each outcome in the repo decision log.
+#
+Decision
+Default in this guide
+Cost of changing later
+D1
+Transport: confirm Nearby Connections (Play Services dependency) vs DIY-first
+Nearby for MVP; DIY behind interface (Section 3.2)
+After M2: high — sync assumes transport semantics; decide before M1
+D2
+Final product name
+Working title only; ASO pattern in Section 12
+Low until listing submission; package ID should embed the final name early
+D3
+Pro price: $9.99 vs $14.99
+~$9.99 (Section 2 math)
+Low — price is store metadata; decide before paywall copy is final
+D4
+Encryption mode: passphrase (default) vs open-mesh default
+Passphrase default; open mode visibly distinct (Section 10)
+Medium — join flow and onboarding copy depend on it; decide before M4
+Appendix A: Screen inventory checklist
+Onboarding: display name
+Onboarding: permission rationale (per group)
+Onboarding: map-pack download (forced step)
+Onboarding: can/can't do summary
+Mesh (home): toggle, node list, relay summary, banner states
+Chat: group thread, composer with counter, message states
+Map: packs, pins layer, node layer, drop-pin flow, grid fallback
+Checklists: list with progress
+Checklist detail: check/add, doneBy attribution
+Status board: roll-call, own-status control, NEED_HELP ordering
+Settings: name, TTL, service behavior, location sharing, packs, export, about
+Paywall: comparison, purchase, restore (NEED_HELP-deferred)
+Help: range honesty, mesh-off explanation, encryption label
+Appendix B: Message envelope &amp; sync rules
+Every object crosses the radio in one envelope, serialized (Protocol Buffers or kotlinx.serialization — pick one in M1 and freeze it; field numbers/names are an API):
+Envelope field
+Type
+Rule
+objectType
+Enum
+MESSAGE, PIN, CHECKLIST, CHECKLIST_ITEM, STATUS, PRESENCE
+objectId
+UUID string
+Primary key of the enclosed row; dedup key
+senderId
+UUID string
+Originating deviceId (not the relaying device)
+updatedAtMs
+Long
+Author timestamp; last-write-wins input
+ttlHops
+Int
+Decremented by each relay; drop at 0
+payload
+Bytes
+Encrypted (Section 10) serialized row delta
+On connect: exchange inventory summaries; request missing IDs; send in priority order (STATUS/NEED_HELP, PIN, MESSAGE, checklist deltas, PRESENCE).
+On receive: decrypt, verify ID unseen (or newer updatedAtMs for mutable objects), persist, then relay if ttlHops &gt; 0 and the object is relayable.
+Presence beacons (deviceId, displayName, battery?, optional lat/lng, timestamp) ride the same envelope at low priority and refresh Node.lastSeenMs/hopCount; hopCount is computed from the relay path, never trusted from the payload.
+Seen-ID cache and tombstones retained 7 and 30 days respectively; cleanup in a nightly (charging-constrained) WorkManager job.
+Appendix C: Risk register
+Risk
+Impact
+Mitigation
+Play Services absent/older on field devices
+Cannot join mesh
+Detect + explain in onboarding; DIY transport v2; document in listing
+Battery drain reviews
+Store rating death
+Duty cycling, MeshConfig budget, honest notification, Section 14 budget gate
+Range disappointment ("said hundreds of yards")
+Refunds, 1-star reviews
+Hop UI, onboarding honesty screen, listing copy rules (Sections 3.4, 9)
+Permission friction (location-labelled dialogs)
+Abandoned setup
+Rationale-first flow, manual pins without GPS fix, deferred asks
+Map-pack size / download abandonment
+Map feature unused
+Region-sized packs, size labels, forced-but-skippable onboarding step
+Clock-skew conflict corruption
+Wrong checklist state
+Timestamp clamp (Section 5.6), tie-break on ID, skew test in Section 14
+OEM battery killers stop the service
+"App randomly stops" reports
+Foreground service, OEM guidance in Help, never promise background magic
+— End of build guide —

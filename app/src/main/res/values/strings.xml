@@ -1,0 +1,10 @@
+<resources>
+    <!-- Working title; final name is open decision D2. -->
+    <string name="app_name">Off-Grid Mesh</string>
+
+    <string name="channel_mesh">Mesh status</string>
+    <string name="channel_mesh_desc">Shows while the mesh is active. If this notification is gone, the mesh is off.</string>
+    <string name="notif_title">Mesh active — %1$d nearby</string>
+    <string name="notif_text">Relaying for your team. Tap Stop to turn the mesh off.</string>
+    <string name="notif_stop">Stop</string>
+</resources>

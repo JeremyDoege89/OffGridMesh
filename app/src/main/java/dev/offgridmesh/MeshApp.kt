@@ -4,6 +4,8 @@ import android.app.Application
 import dev.offgridmesh.data.ChatRepository
 import dev.offgridmesh.data.IdentityStore
 import dev.offgridmesh.data.MeshDatabase
+import dev.offgridmesh.data.PinRepository
+import dev.offgridmesh.maps.MapPackManager
 import dev.offgridmesh.data.SettingsStore
 import dev.offgridmesh.mesh.MeshState
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -19,6 +21,8 @@ class MeshApp : Application() {
     /** Ids of locally created objects for the running SyncEngine to push now (missed ones go by inventory). */
     val outbox = MutableSharedFlow<String>(extraBufferCapacity = 64)
     val chat by lazy { ChatRepository(db, identity, settings, outbox) }
+    val pins by lazy { PinRepository(db, identity, settings, outbox) }
+    val mapPacks by lazy { MapPackManager(this, db.mapPacks()) }
 
     /** Set while the chat screen is on screen, so incoming messages don't also raise a notification. */
     @Volatile var chatVisible = false

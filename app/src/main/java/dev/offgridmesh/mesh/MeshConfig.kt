@@ -17,9 +17,15 @@ object MeshConfig {
     /** Gossip records (and so the dedup memory and relay queue) are kept this long (§5.6 seen-ID cache). */
     const val GOSSIP_RETENTION_MS = 7L * 24 * 60 * 60_000
 
+    /** Deleted pins/checklists stay as relayable tombstones this long (§5). */
+    const val TOMBSTONE_RETENTION_MS = 30L * 24 * 60 * 60_000
+
     /** Inventory sent on connect: newest relayable records only, in pages that fit one Nearby BYTES payload. */
     const val INVENTORY_MAX_ENTRIES = 2_000
     const val INVENTORY_PAGE = 400
+
+    /** A teammate's clock this far off ours gets a warning on the Mesh screen. */
+    const val CLOCK_WARN_MS = 10L * 60_000
 
     /** Timestamps further ahead of the receiver's clock than this are clamped (§5.6 clock skew). */
     const val MAX_FUTURE_SKEW_MS = 24L * 60 * 60_000

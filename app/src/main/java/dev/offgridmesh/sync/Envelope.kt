@@ -28,6 +28,13 @@ enum class ObjectType {
     /** Control frames between two directly connected peers; never stored or relayed. */
     @ProtoNumber(8) INVENTORY,
     @ProtoNumber(9) REQUEST,
+    ;
+
+    /**
+     * Shared workspace state (pins, checklists, status) must reach every member eventually, so it is not
+     * hop-limited: every holder keeps offering it. Chat, receipts and presence are hop-limited by TTL (§5.6).
+     */
+    val replicated: Boolean get() = this == PIN || this == CHECKLIST || this == CHECKLIST_ITEM || this == STATUS
 }
 
 @Serializable
@@ -54,6 +61,7 @@ data class Presence(
     @ProtoNumber(2) val displayName: String,
     @ProtoNumber(3) val timestampMs: Long,
     @ProtoNumber(4) val batteryPct: Int? = null,
+    /** Present only while the member shares location. */
     @ProtoNumber(5) val lat: Double? = null,
     @ProtoNumber(6) val lng: Double? = null,
 )
@@ -84,6 +92,34 @@ data class Ack(
 ) {
     companion object {
         fun objectId(messageId: String, ackerId: String) = "ack:$messageId:$ackerId"
+    }
+}
+
+@Serializable
+enum class PinType {
+    @ProtoNumber(1) HAZARD,
+    @ProtoNumber(2) RALLY_POINT,
+    @ProtoNumber(3) RESOURCE,
+    @ProtoNumber(4) OTHER,
+}
+
+/** Full pin state; every edit or delete sends the whole row with a newer updatedAtMs (§5.3, §5.6). */
+@Serializable
+data class PinPayload(
+    @ProtoNumber(1) val id: String,
+    @ProtoNumber(2) val lat: Double,
+    @ProtoNumber(3) val lng: Double,
+    @ProtoNumber(4) val label: String,
+    @ProtoNumber(5) val type: PinType,
+    @ProtoNumber(6) val creatorId: String,
+    @ProtoNumber(7) val creatorName: String,
+    @ProtoNumber(8) val createdAtMs: Long,
+    @ProtoNumber(9) val updatedAtMs: Long,
+    @ProtoNumber(10) val editorId: String,
+    @ProtoNumber(11) val deleted: Boolean = false,
+) {
+    companion object {
+        const val MAX_LABEL = 60
     }
 }
 

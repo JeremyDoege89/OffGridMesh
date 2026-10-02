@@ -79,7 +79,10 @@ class MeshService : LifecycleService() {
             val me = app.identity.current()
             var ttl = app.settings.ttlHops.first()
             launch { app.settings.ttlHops.collect { ttl = it } }
-            app.db.gossip().prune(System.currentTimeMillis() - MeshConfig.GOSSIP_RETENTION_MS)
+            val startedAt = System.currentTimeMillis()
+            app.db.gossip().prune(startedAt - MeshConfig.GOSSIP_RETENTION_MS, startedAt - MeshConfig.TOMBSTONE_RETENTION_MS)
+            app.db.pins().pruneTombstones(startedAt - MeshConfig.TOMBSTONE_RETENTION_MS)
+            app.db.gossip().pruneClamped(startedAt - MeshConfig.TOMBSTONE_RETENTION_MS)
 
             val engine = SyncEngine(
                 selfId = me.deviceId,
@@ -97,7 +100,7 @@ class MeshService : LifecycleService() {
                 app.identity.identity.map { it.displayName }.distinctUntilChanged().collectLatest { name ->
                     newCore.rename(name)
                     while (true) {
-                        engine.originatePresence(name.ifBlank { "Unnamed" }, batteryPct())
+                        engine.originatePresence(name.ifBlank { "Unnamed" }, batteryPct(), sharedLocation())
                         delay(MeshConfig.PRESENCE_INTERVAL_MS)
                     }
                 }
@@ -142,6 +145,18 @@ class MeshService : LifecycleService() {
             )
             .build()
         NotificationManagerCompat.from(this).notify(MESSAGE_NOTIFICATION_ID, n)
+    }
+
+    /** Last known fix, only when the user shares location and has granted it (§6, §10). */
+    private suspend fun sharedLocation(): android.location.Location? {
+        if (!app.settings.shareLocation.first()) return null
+        if (!PermissionGroup.LOCATION.granted(this)) return null
+        val lm = getSystemService(LOCATION_SERVICE) as android.location.LocationManager
+        return try {
+            lm.getProviders(true).mapNotNull { lm.getLastKnownLocation(it) }.maxByOrNull { it.time }
+        } catch (_: SecurityException) {
+            null
+        }
     }
 
     private fun batteryPct(): Int? =

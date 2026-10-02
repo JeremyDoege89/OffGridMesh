@@ -228,12 +228,33 @@ private fun NodeRow(node: Node, connected: Boolean, now: Long) {
         node.hopCount > 0 && !stale -> "${hopLabel(node.hopCount)} · ${ago(node.lastSeenMs, now)}"
         else -> "Not connected · last seen ${ago(node.lastSeenMs, now)}"
     }
+    val skew = node.clockSkewMs?.takeIf { kotlin.math.abs(it) > MeshConfig.CLOCK_WARN_MS }
     ListItem(
         modifier = Modifier.alpha(if (stale) 0.55f else 1f), // offline members are greyed, never removed (§9)
         headlineContent = { Text(node.displayName.ifBlank { "Unnamed" }, fontWeight = FontWeight.SemiBold) },
-        supportingContent = { Text(where) },
+        supportingContent = {
+            Column {
+                Text(where)
+                if (skew != null) {
+                    Text(
+                        "Clock is ${skewText(skew)} — ask them to fix the time, or their edits may win conflicts.",
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        },
         trailingContent = { node.batteryPct?.let { Text("$it%") } },
     )
+}
+
+private fun skewText(ms: Long): String {
+    val m = kotlin.math.abs(ms) / 60_000
+    val amount = when {
+        m >= 2 * 1440 -> "${m / 1440} days"
+        m >= 120 -> "${m / 60} hours"
+        else -> "$m minutes"
+    }
+    return amount + if (ms > 0) " ahead" else " behind"
 }
 
 @Composable

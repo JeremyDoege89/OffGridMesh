@@ -81,6 +81,30 @@ class MessageDaoTest {
         assertEquals(1, db.messages().observeChannel("main").first().size)
     }
 
+    @Test fun pinLastWriteWinsWithEditorTieBreak() = runTest {
+        val base = dev.offgridmesh.data.PinEntity("p", 1.0, 2.0, "A", dev.offgridmesh.sync.PinType.HAZARD, "c", "C", 1, 10, "b", false)
+        assertTrue(db.pins().applyIfNewer(base))
+        assertFalse("older loses", db.pins().applyIfNewer(base.copy(label = "old", updatedAtMs = 5)))
+        assertFalse("same version, lower editor loses", db.pins().applyIfNewer(base.copy(label = "x", editorId = "a")))
+        assertTrue("same version, higher editor wins", db.pins().applyIfNewer(base.copy(label = "y", editorId = "z")))
+        assertTrue(db.pins().applyIfNewer(base.copy(label = "gone", updatedAtMs = 20, deleted = true)))
+        assertTrue(db.pins().observeLive().first().isEmpty())
+        assertEquals(1, db.pins().pruneTombstones(21))
+    }
+
+    @Test fun migrate2To3KeepsMessagesAndNodes() {
+        migrations.createDatabase("mig3.db", 2).use {
+            it.execSQL("INSERT INTO node VALUES ('b', 'Bravo', 10, 0, 41)")
+            it.execSQL("INSERT INTO message (id, senderId, senderName, timestampMs, text, ttlHops, state, channelId, relays, receivedAtMs) VALUES ('m', 'b', 'Bravo', 1, 'hi', 3, 'RECEIVED', 'main', 0, 2)")
+            it.execSQL("INSERT INTO gossip VALUES ('m', 'MESSAGE', 'b', 1, 2, 1, x'00', 2)")
+        }
+        migrations.runMigrationsAndValidate("mig3.db", 3, true).use {
+            it.query("SELECT COUNT(*) FROM message").use { c -> c.moveToFirst(); assertEquals(1, c.getInt(0)) }
+            it.query("SELECT deleted FROM gossip").use { c -> c.moveToFirst(); assertEquals(0, c.getInt(0)) }
+            it.query("SELECT lat FROM node").use { c -> c.moveToFirst(); assertTrue(c.isNull(0)) }
+        }
+    }
+
     @Test fun migrate1To2KeepsNodes() {
         migrations.createDatabase("mig.db", 1).use {
             it.execSQL("INSERT INTO node VALUES ('b', 'Bravo', 10, 0, 41)")

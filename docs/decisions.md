@@ -29,3 +29,24 @@ Development proceeds on the guide's defaults until the owner rules. Silence is n
 - **ACK cost:** every receiver floods one receipt per message (≈ N² small envelopes per message for N nodes).
   Fine at ≤ 12 nodes; revisit in the M4 8–12 node stress test.
 - **Seen-cache cleanup** runs when the mesh starts, not in a nightly WorkManager job yet (M5).
+
+## Open decision added in M3
+
+| # | Decision | Current default | Owner ruling |
+|---|---|---|---|
+| D5 | Where map packs come from (production) | App cuts the framed area from the newest **Protomaps public daily planet build** (`build.protomaps.com`). Fine for development; Protomaps doesn't offer it as a production backend. Production: host one planet `.pmtiles` (~138 GB, static file with range requests, e.g. Cloudflare R2) and set `MapSource.PLANET_URL`. No app changes needed. | _pending — before release_ |
+
+## Engineering decisions made in M3
+
+- **Packs are cut on the phone** (PMTiles → MBTiles) instead of prebuilt region files: any area, exact
+  size shown before download, no build pipeline. Spec §6's tilemaker/planetiler step is unnecessary.
+- **Map schema:** Protomaps basemap v4 layers; style is bundled (`MapStyle`), glyphs in assets, light palette.
+- **Shared state is not hop-limited.** Pins (and in M4 checklists/status) replicate to every member through
+  inventories; TTL limits only chat, receipts and presence. §5.6 says relay-with-TTL applies to messages.
+- **Pins are last-write-wins** on (updatedAtMs, editorId). Deletes are tombstones relayed 30 days.
+  Local edits use max(now, previous+1) so they always supersede what the phone shows.
+- **Clock skew:** versions > 24 h ahead are clamped *and remembered*, so the skewed phone's re-offers can't
+  win again; the Mesh screen warns when a teammate's clock is > 10 min off. Residual: the skewed phone
+  itself keeps its own version until its clock is fixed.
+- **Location sharing is off by default**; toggle on the Map screen and in Settings.
+- **Pack download runs in an app-scoped coroutine** with the screen kept on, not a WorkManager job (M5).

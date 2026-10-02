@@ -1,5 +1,7 @@
 package dev.offgridmesh.sync
 
+import android.util.Log
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -23,6 +25,8 @@ class GossipRecord(
     val outRelays: Int,
     val payload: ByteArray,
     val receivedAtMs: Long,
+    /** Tombstone: kept and relayed for 30 days so the delete reaches phones that were away (§5). */
+    @ColumnInfo(defaultValue = "0") val deleted: Boolean = false,
 ) {
     fun toEnvelope() = Envelope(objectType, objectId, senderId, updatedAtMs, outTtl, payload, outRelays)
 }
@@ -33,7 +37,11 @@ interface GossipStore {
     suspend fun save(record: GossipRecord)
     suspend fun get(objectId: String): GossipRecord?
     suspend fun records(objectIds: List<String>): List<GossipRecord>
-    /** Relayable records received since [sinceMs], newest first. */
+    /** True if this exact future-dated edit was already clamped once (so a re-offer can't win again). */
+    suspend fun wasClamped(objectId: String, senderId: String, originalVersion: Long): Boolean
+    suspend fun rememberClamped(objectId: String, senderId: String, originalVersion: Long, atMs: Long)
+
+    /** Relayable records: hop-limited ones received since [sinceMs], plus all replicated state; newest first. */
     suspend fun relayable(sinceMs: Long, limit: Int): List<InventoryEntry>
 }
 
@@ -41,7 +49,11 @@ interface GossipStore {
 interface SyncSink {
     /** Returns true when this message is new to this device. */
     suspend fun message(m: ChatMessage, relays: Int, viaDeviceId: String?, receivedAtMs: Long): Boolean
-    suspend fun presence(p: Presence, relays: Int, seenAtMs: Long)
+    /** [clockSkewMs]: author clock minus ours, measured from a direct beacon; null when relayed. */
+    suspend fun presence(p: Presence, relays: Int, seenAtMs: Long, clockSkewMs: Long?)
+    /** Returns true when this version was applied (it was newer than what the phone had). */
+    suspend fun pin(p: PinPayload): Boolean
+
     /** A receipt for one of our own messages. */
     suspend fun ack(messageId: String, ackerId: String, atMs: Long)
     /** One of our own messages was handed to a connected peer for the first time (Queued → Relayed). */
@@ -107,8 +119,14 @@ class SyncEngine(
     }
 
     /** Stores a locally created object and hands it to every connected peer. */
-    suspend fun originate(type: ObjectType, objectId: String, updatedAtMs: Long, payload: ByteArray) {
-        val rec = GossipRecord(objectId, type, selfId, updatedAtMs, ttlHops(), 0, payload, clock())
+    suspend fun originate(
+        type: ObjectType,
+        objectId: String,
+        updatedAtMs: Long,
+        payload: ByteArray,
+        deleted: Boolean = false,
+    ) {
+        val rec = GossipRecord(objectId, type, selfId, updatedAtMs, ttlHops(), 0, payload, clock(), deleted)
         store.save(rec)
         flood(rec, exceptEndpoint = null)
     }
@@ -118,26 +136,51 @@ class SyncEngine(
         store.get(objectId)?.let { flood(it, exceptEndpoint = null) }
     }
 
-    suspend fun originatePresence(displayName: String, batteryPct: Int?) {
+    suspend fun originatePresence(displayName: String, batteryPct: Int?, location: android.location.Location? = null) {
         val now = clock()
-        val p = Presence(selfId, displayName, now, batteryPct)
+        val p = Presence(selfId, displayName, now, batteryPct, location?.latitude, location?.longitude)
         originate(ObjectType.PRESENCE, selfId, now, WireCodec.encodePayload(p))
     }
 
     private suspend fun accept(env: Envelope, endpointId: String) {
-        if (env.senderId == selfId) return // our own object echoing back
-        val have = store.version(env.objectId)
-        if (have != null && have >= env.updatedAtMs) return
         val now = clock()
+        // §5.6: a phone with a wrong clock must not win every conflict. Clamp versions to ≤ 24 h ahead.
+        val version = env.updatedAtMs.coerceAtMost(now + MeshConfig.MAX_FUTURE_SKEW_MS)
+        if (version != env.updatedAtMs) {
+            // Without this memory the skewed phone's re-offers would be re-clamped to a later "now + 24 h"
+            // every time and keep beating newer real edits.
+            if (store.wasClamped(env.objectId, env.senderId, env.updatedAtMs)) return
+            store.rememberClamped(env.objectId, env.senderId, env.updatedAtMs, now)
+            Log.w(TAG, "clamped future timestamp on ${env.objectType} ${env.objectId} from ${env.senderId}")
+        }
+        val have = store.version(env.objectId)
+        if (have != null && have >= version) return
+        val replicated = env.objectType.replicated
+        // Our own hop-limited objects never need taking back; our own shared state can (another phone
+        // may hold a newer edit of it only if it was edited elsewhere, so the version check covers that).
+        if (env.senderId == selfId && !replicated) return
+
+        var deleted = false
+        when (env.objectType) {
+            ObjectType.PIN -> {
+                val p = WireCodec.decodePayload<PinPayload>(env.payload) ?: return
+                if (p.id != env.objectId) return
+                deleted = p.deleted
+                sink.pin(p.copy(updatedAtMs = version, label = p.label.take(PinPayload.MAX_LABEL)))
+            }
+            else -> Unit
+        }
+
         val rec = GossipRecord(
             objectId = env.objectId,
             objectType = env.objectType,
             senderId = env.senderId,
-            updatedAtMs = env.updatedAtMs,
-            outTtl = (env.ttlHops - 1).coerceAtLeast(0),
+            updatedAtMs = version,
+            outTtl = if (replicated) env.ttlHops.coerceAtLeast(1) else (env.ttlHops - 1).coerceAtLeast(0),
             outRelays = env.relays + 1,
             payload = env.payload,
             receivedAtMs = now,
+            deleted = deleted,
         )
         store.save(rec)
 
@@ -163,7 +206,9 @@ class SyncEngine(
                 if (p.deviceId != env.senderId) return
                 // Direct: we saw it now. Relayed: it was true when the author sent it (never in our future).
                 val seenAt = if (env.relays == 0) now else p.timestampMs.coerceAtMost(now)
-                sink.presence(p, env.relays, seenAt)
+                // Only a direct beacon measures a peer's clock; relayed ones are delayed by the path.
+                val skew = if (env.relays == 0) p.timestampMs - now else null
+                sink.presence(p, env.relays, seenAt, skew)
             }
 
             ObjectType.ACK -> {
@@ -179,7 +224,8 @@ class SyncEngine(
     private suspend fun flood(rec: GossipRecord, exceptEndpoint: String?) {
         if (rec.outTtl <= 0) return
         for ((endpointId, deviceId) in link.connectedPeers()) {
-            if (endpointId == exceptEndpoint || deviceId == rec.senderId) continue
+            if (endpointId == exceptEndpoint) continue
+            if (deviceId == rec.senderId && !rec.objectType.replicated) continue
             sendRecord(endpointId, rec)
         }
     }
@@ -194,6 +240,8 @@ class SyncEngine(
     }
 
     private companion object {
+        const val TAG = "SyncEngine"
+
         /** Relay order (§5.6): NEED_HELP/status first, then pins, messages, receipts, checklists, presence. */
         fun priority(t: ObjectType) = when (t) {
             ObjectType.STATUS -> 0

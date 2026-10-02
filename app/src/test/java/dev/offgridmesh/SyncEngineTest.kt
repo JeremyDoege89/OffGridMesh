@@ -7,6 +7,8 @@ import dev.offgridmesh.sync.GossipRecord
 import dev.offgridmesh.sync.GossipStore
 import dev.offgridmesh.sync.InventoryEntry
 import dev.offgridmesh.sync.ObjectType
+import dev.offgridmesh.sync.PinPayload
+import dev.offgridmesh.sync.PinType
 import dev.offgridmesh.sync.Presence
 import dev.offgridmesh.sync.SyncEngine
 import dev.offgridmesh.sync.SyncSink
@@ -30,6 +32,12 @@ private class MemStore : GossipStore {
         .filter { it.outTtl > 0 && it.receivedAtMs >= sinceMs }
         .sortedByDescending { it.receivedAtMs }.take(limit)
         .map { InventoryEntry(it.objectId, it.updatedAtMs) }
+    val clamped = mutableSetOf<Triple<String, String, Long>>()
+    override suspend fun wasClamped(objectId: String, senderId: String, originalVersion: Long) =
+        Triple(objectId, senderId, originalVersion) in clamped
+    override suspend fun rememberClamped(objectId: String, senderId: String, originalVersion: Long, atMs: Long) {
+        clamped += Triple(objectId, senderId, originalVersion)
+    }
 }
 
 private class MemSink : SyncSink {
@@ -38,12 +46,23 @@ private class MemSink : SyncSink {
     val presence = mutableMapOf<String, Pair<Presence, Int>>()
     val acks = mutableSetOf<Pair<String, String>>()
     val relayed = mutableSetOf<String>()
+    val pins = mutableMapOf<String, PinPayload>()
+    override suspend fun pin(p: PinPayload): Boolean {
+        val old = pins[p.id]
+        if (old != null && (old.updatedAtMs > p.updatedAtMs || (old.updatedAtMs == p.updatedAtMs && old.editorId >= p.editorId))) return false
+        pins[p.id] = p
+        return true
+    }
     override suspend fun message(m: ChatMessage, relays: Int, viaDeviceId: String?, receivedAtMs: Long): Boolean {
         if (messages.any { it.m.id == m.id }) return false
         messages += Got(m, relays, viaDeviceId)
         return true
     }
-    override suspend fun presence(p: Presence, relays: Int, seenAtMs: Long) { presence[p.deviceId] = p to relays }
+    val skew = mutableMapOf<String, Long>()
+    override suspend fun presence(p: Presence, relays: Int, seenAtMs: Long, clockSkewMs: Long?) {
+        presence[p.deviceId] = p to relays
+        clockSkewMs?.let { skew[p.deviceId] = it }
+    }
     override suspend fun ack(messageId: String, ackerId: String, atMs: Long) { acks += messageId to ackerId }
     override suspend fun relayed(messageId: String, atMs: Long) { relayed += messageId }
 }
@@ -207,9 +226,104 @@ class SyncEngineTest {
         val (a, b, c) = line("A", "B", "C")
         listOf(a, b, c).forEach { it.boot() }
         runCurrent()
-        a.engine.originate(ObjectType.PIN, "pin-1", 5, byteArrayOf(1, 2, 3))
+        // CHECKLIST has no handler yet (M4): it must still travel intact.
+        a.engine.originate(ObjectType.CHECKLIST, "list-1", 5, byteArrayOf(1, 2, 3))
         runCurrent()
-        assertEquals(listOf<Byte>(1, 2, 3), c.store.map["pin-1"]!!.payload.toList())
-        assertNull(c.store.map["pin-1"]?.takeIf { it.outTtl > 1 })
+        assertEquals(listOf<Byte>(1, 2, 3), c.store.map["list-1"]!!.payload.toList())
+    }
+
+    /** Like PinRepository: the local row changes, then the version goes out. */
+    private suspend fun Phone.pin(p: PinPayload) {
+        sink.pin(p)
+        engine.originate(ObjectType.PIN, p.id, p.updatedAtMs, WireCodec.encodePayload(p), deleted = p.deleted)
+    }
+
+    private fun pinOf(by: Phone, at: Long, label: String = "Water", deleted: Boolean = false) =
+        PinPayload("pin-1", 36.1, -86.7, label, PinType.RESOURCE, by.id, by.name, 0, at, by.id, deleted)
+
+    @Test fun pinsReachEveryoneRegardlessOfTtl() = runTest {
+        val (a, b, c, d, e) = line("A", "B", "C", "D", "E")
+        listOf(a, b, c, d, e).forEach { it.ttl = 1; it.boot() }
+        runCurrent()
+        a.pin(pinOf(a, 1))
+        runCurrent()
+        assertEquals("shared state is not hop-limited", "Water", e.sink.pins["pin-1"]!!.label)
+    }
+
+    @Test fun pinReachesLateJoinerThroughInventory() = runTest {
+        val (a, b) = line("A", "B")
+        a.boot()
+        runCurrent()
+        a.pin(pinOf(a, 1))
+        runCurrent()
+        b.boot()
+        runCurrent()
+        assertEquals("Water", b.sink.pins["pin-1"]!!.label)
+    }
+
+    @Test fun deleteReachesPhoneThatWasAwayForIt() = runTest {
+        val (a, b, c) = line("A", "B", "C")
+        listOf(a, b, c).forEach { it.boot() }
+        runCurrent()
+        a.pin(pinOf(a, 1))
+        runCurrent()
+        c.core.stop() // C walks off
+        runCurrent()
+        a.pin(pinOf(a, 2, deleted = true))
+        runCurrent()
+        assertTrue(b.sink.pins["pin-1"]!!.deleted)
+        assertTrue(!c.sink.pins["pin-1"]!!.deleted)
+        c.boot() // back in range of B only
+        runCurrent()
+        assertTrue("tombstone propagated on rejoin", c.sink.pins["pin-1"]!!.deleted)
+        assertTrue(c.store.map["pin-1"]!!.deleted)
+    }
+
+    @Test fun partitionedEditsResolveLastWriteWinsEverywhere() = runTest {
+        val (a, b, c) = line("A", "B", "C")
+        listOf(a, b, c).forEach { it.boot() }
+        runCurrent()
+        a.pin(pinOf(a, 1))
+        runCurrent()
+        b.core.stop() // A and C are now cut off from each other
+        runCurrent()
+        c.pin(pinOf(c, 20, "Water — empty"))
+        a.pin(pinOf(a, 10, "Water — full"))
+        runCurrent()
+        b.boot()
+        runCurrent()
+        for (p in listOf(a, b, c)) assertEquals(p.name, "Water — empty", p.sink.pins["pin-1"]!!.label)
+    }
+
+    @Test fun skewedClockCannotWinForever() = runTest {
+        val (a, b) = line("A", "B")
+        a.boot(); b.boot()
+        runCurrent()
+        val day = 24L * 60 * 60_000
+        a.pin(pinOf(a, 30 * day, "From a bad clock"))
+        runCurrent()
+        val stored = b.sink.pins["pin-1"]!!
+        assertTrue("clamped to ≤ 24 h ahead", stored.updatedAtMs <= testScheduler.currentTime + day)
+        // A real edit made after the clamp point wins…
+        testScheduler.advanceTimeBy(day + 1_000)
+        b.pin(pinOf(b, testScheduler.currentTime, "Fixed"))
+        runCurrent()
+        assertEquals("Fixed", b.sink.pins["pin-1"]!!.label)
+        // …and stays won when the skewed phone offers its old edit again on the next connection.
+        b.core.stop()
+        runCurrent()
+        b.boot()
+        runCurrent()
+        assertEquals("Fixed", b.sink.pins["pin-1"]!!.label)
+    }
+
+    @Test fun directPresenceMeasuresClockSkew() = runTest {
+        val (a, b) = line("A", "B")
+        a.boot(); b.boot()
+        runCurrent()
+        val p = dev.offgridmesh.sync.Presence(a.id, "A", testScheduler.currentTime + 2 * 24 * 60 * 60_000L)
+        a.engine.originate(ObjectType.PRESENCE, a.id, p.timestampMs, WireCodec.encodePayload(p))
+        runCurrent()
+        assertEquals(2 * 24 * 60 * 60_000L, b.sink.skew[a.id])
     }
 }

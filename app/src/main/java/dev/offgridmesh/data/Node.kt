@@ -18,6 +18,12 @@ data class Node(
     /** 0 = direct; >0 via relay. Display only. */
     val hopCount: Int,
     val batteryPct: Int?,
+    /** Last shared position, only if the member shares location (§6). Never required. */
+    val lat: Double? = null,
+    val lng: Double? = null,
+    val locationAtMs: Long? = null,
+    /** Their clock minus ours, from the last direct beacon. Shown when far off (§5.6, §14 clock-skew). */
+    val clockSkewMs: Long? = null,
 )
 
 @Dao
@@ -49,7 +55,18 @@ interface NodeDao {
                 lastSeenMs = seenAtMs,
                 hopCount = hopCount,
                 batteryPct = batteryPct ?: old?.batteryPct,
+                lat = old?.lat,
+                lng = old?.lng,
+                locationAtMs = old?.locationAtMs,
+                clockSkewMs = old?.clockSkewMs,
             ),
         )
     }
+
+    @Query("UPDATE node SET clockSkewMs = :skewMs WHERE deviceId = :deviceId")
+    suspend fun setClockSkew(deviceId: String, skewMs: Long)
+
+    /** A presence beacon's position; null clears it (the member stopped sharing). */
+    @Query("UPDATE node SET lat = :lat, lng = :lng, locationAtMs = :atMs WHERE deviceId = :deviceId AND (locationAtMs IS NULL OR locationAtMs <= :atMs)")
+    suspend fun setLocation(deviceId: String, lat: Double?, lng: Double?, atMs: Long)
 }

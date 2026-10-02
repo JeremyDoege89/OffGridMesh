@@ -25,6 +25,9 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.offgridmesh.MeshApp
+import dev.offgridmesh.ui.map.DownloadAreaScreen
+import dev.offgridmesh.ui.map.MapPacksScreen
+import dev.offgridmesh.ui.map.MapScreen
 
 enum class Tab(val label: String, val icon: ImageVector) {
     MESH("Mesh", Icons.Filled.Hub),
@@ -33,6 +36,8 @@ enum class Tab(val label: String, val icon: ImageVector) {
     TASKS("Tasks", Icons.Filled.Checklist),
     STATUS("Status", Icons.Filled.HealthAndSafety),
 }
+
+enum class Page { SETTINGS, PACKS, DOWNLOAD }
 
 @Composable
 fun AppRoot(requestedTab: Tab? = null, onTabConsumed: () -> Unit = {}) {
@@ -43,23 +48,41 @@ fun AppRoot(requestedTab: Tab? = null, onTabConsumed: () -> Unit = {}) {
     if (id.deviceId.isEmpty()) return
 
     var rerunSetup by rememberSaveable { mutableStateOf(false) }
+    // Full-screen pages over the tabs; each Back returns to the page it came from.
+    var stack by rememberSaveable { mutableStateOf(listOf<Page>()) }
+    val push = { p: Page -> stack = stack + p }
+    val pop = { stack = stack.dropLast(1) }
+
+    when (stack.lastOrNull()) {
+        Page.DOWNLOAD -> { DownloadAreaScreen(onBack = pop); return }
+        Page.PACKS -> { MapPacksScreen(onBack = pop, onDownload = { push(Page.DOWNLOAD) }); return }
+        Page.SETTINGS -> {
+            SettingsScreen(
+                onBack = pop,
+                onPreTripSetup = { stack = emptyList(); rerunSetup = true },
+                onOpenPacks = { push(Page.PACKS) },
+            )
+            return
+        }
+        null -> Unit
+    }
+
     if (!id.onboarded || rerunSetup) {
-        OnboardingScreen(initialName = id.displayName, onDone = { rerunSetup = false })
+        OnboardingScreen(
+            initialName = id.displayName,
+            onDownloadMap = { push(Page.DOWNLOAD) },
+            onDone = { rerunSetup = false },
+        )
         return
     }
 
     var tab by rememberSaveable { mutableStateOf(Tab.MESH) }
-    var settings by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(requestedTab) {
         if (requestedTab != null) {
             tab = requestedTab
-            settings = false
+            stack = emptyList()
             onTabConsumed()
         }
-    }
-    if (settings) {
-        SettingsScreen(onBack = { settings = false }, onPreTripSetup = { settings = false; rerunSetup = true })
-        return
     }
 
     Scaffold(
@@ -79,9 +102,9 @@ fun AppRoot(requestedTab: Tab? = null, onTabConsumed: () -> Unit = {}) {
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
             when (tab) {
-                Tab.MESH -> MeshScreen(onOpenSettings = { settings = true })
+                Tab.MESH -> MeshScreen(onOpenSettings = { push(Page.SETTINGS) })
                 Tab.CHAT -> ChatScreen()
-                Tab.MAP -> ComingSoon("Map", "Offline maps and pins arrive in milestone M3.")
+                Tab.MAP -> MapScreen(onOpenPacks = { push(Page.PACKS) })
                 Tab.TASKS -> ComingSoon("Tasks", "Shared checklists arrive in milestone M4.")
                 Tab.STATUS -> ComingSoon("Status", "The OK / Need help board arrives in milestone M4.")
             }

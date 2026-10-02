@@ -11,8 +11,8 @@ Owner decisions: `docs/decisions.md`.
 | Milestone | Scope | State |
 |---|---|---|
 | M1 | Nearby transport behind `MeshTransport`, foreground `MeshService`, node list | Done; two phones connected in the field (formal timings not measured). |
-| M2 | Chat, store-and-forward, TTL relay, message states | Code done; JVM + on-device DAO tests pass. **3-phone A–B–C acceptance not run.** |
-| M3 | Offline maps (MapLibre + MBTiles) + pins | — |
+| M2 | Chat, store-and-forward, TTL relay, message states | 2-phone field test passed (queued→delivered, receipts). **3-phone A–B–C relay not run.** |
+| M3 | Offline maps (MapLibre + MBTiles) + pins | Code done; JVM + device tests pass. On-phone pack download / pin sync not yet field-tested. |
 | M4 | Checklists, status board, passphrase encryption, paywall | — |
 | M5 | Battery/Doze tuning, billing edge cases, release | — |
 
@@ -22,8 +22,9 @@ Owner decisions: `docs/decisions.md`.
 transport/  MeshTransport interface, NearbyTransport (Play Services), PeerInfo advert codec
 mesh/       MeshCore (connection policy, presence; transport-agnostic), MeshService (FGS), MeshConfig, permissions
 sync/       Envelope wire format (kotlinx ProtoBuf — frozen; field numbers are an API), SyncEngine (gossip)
-data/       Room (node, gossip, message, message_recipient), DataStore identity + settings, ChatRepository
-ui/         Compose: onboarding, Mesh home, Chat, settings; Map/Tasks/Status are placeholders
+maps/       PMTiles reader + area extractor, MBTiles writer, MapPackManager, bundled style, grid/GeoJSON helpers
+data/       Room (node, gossip, message, message_recipient, pin, map_pack, clamped_edit), DataStore, repositories
+ui/         Compose: onboarding (incl. forced map step), Mesh, Chat, Map (+ packs, area download), settings
 ```
 
 Connection policy: every phone advertises and discovers (`P2P_CLUSTER`). Only the lower deviceId requests
@@ -35,6 +36,12 @@ and the 7-day dedup memory. On connect, peers swap inventories of what they can 
 they lack. New objects flood to every other connected peer; a relay sends `ttl−1`, so TTL 3 = at most
 three radio hops. Receivers ACK messages; the author marks a message Delivered once every member known
 when it first left the phone has ACKed. Presence beacons (60 s) ride the same path, giving hop counts.
+
+Maps (§6): a pack is an MBTiles file cut on the phone from a planet-wide PMTiles archive over HTTPS range
+requests: frame an area, "Check download size" reads only the directories (exact size, ~1 s), then the
+tiles download in coalesced ranges. Sample sizes for z0–15: 10 km city box ≈ 5 MB, 40 km city box ≈ 18 MB,
+40 km rural box ≈ 1 MB. Rendering is fully offline: `mbtiles://` source, bundled Noto Sans glyphs
+(OFL, `assets/glyphs`), no sprites. Pins/nodes/grid are GeoJSON layers, never tiles. No pack → grid fallback.
 
 ## Build & test
 

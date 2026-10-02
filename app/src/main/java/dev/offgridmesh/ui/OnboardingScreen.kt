@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -29,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.offgridmesh.MeshApp
 import dev.offgridmesh.data.IdentityStore
 import dev.offgridmesh.mesh.MeshConfig
@@ -38,13 +40,13 @@ import kotlinx.coroutines.launch
 private sealed interface Step {
     data object Name : Step
     data class Permission(val group: PermissionGroup) : Step
-    // M3 inserts the forced map-pack download step here (§6).
+    data object MapPack : Step
     data object CanCant : Step
 }
 
 /** Pre-trip setup (§7.1). Re-runnable from Settings; every step works on Wi-Fi before departure. */
 @Composable
-fun OnboardingScreen(initialName: String, onDone: () -> Unit) {
+fun OnboardingScreen(initialName: String, onDownloadMap: () -> Unit, onDone: () -> Unit) {
     val context = LocalContext.current
     val app = context.applicationContext as MeshApp
     val scope = rememberCoroutineScope()
@@ -52,10 +54,14 @@ fun OnboardingScreen(initialName: String, onDone: () -> Unit) {
         buildList {
             add(Step.Name)
             PermissionGroup.entries.filter { it.applicable }.forEach { add(Step.Permission(it)) }
+            add(Step.MapPack)
             add(Step.CanCant)
         }
     }
     var index by rememberSaveable { mutableIntStateOf(0) }
+    val packs by app.mapPacks.packs.collectAsStateWithLifecycle(initialValue = null)
+    val noMapAcknowledged by app.settings.noMapAcknowledged.collectAsStateWithLifecycle(initialValue = false)
+    var confirmNoMap by rememberSaveable { mutableStateOf(false) }
     var name by rememberSaveable { mutableStateOf(initialName) }
     val next = { if (index < steps.lastIndex) index++ }
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { next() }
@@ -95,6 +101,29 @@ fun OnboardingScreen(initialName: String, onDone: () -> Unit) {
                 }
             }
 
+            Step.MapPack -> {
+                // Forced but skippable (§6): the skip needs an explicit confirmation.
+                Heading("Download your area map now")
+                Text(
+                    "Do it while you have Wi-Fi — you cannot download it in the field. Frame the area you're going to " +
+                        "and the app saves it to this phone.",
+                )
+                val have = packs.orEmpty()
+                if (have.isNotEmpty()) {
+                    Text("Downloaded: " + have.joinToString { it.name }, fontWeight = FontWeight.Bold)
+                    BigButton("Continue") { next() }
+                    TextButton(onClick = onDownloadMap, modifier = Modifier.heightIn(min = 48.dp)) { Text("Download another area") }
+                } else {
+                    BigButton("Choose area to download", onClick = onDownloadMap)
+                    if (noMapAcknowledged) {
+                        Text("You chose to continue without an offline map.")
+                        TextButton(onClick = { next() }, modifier = Modifier.heightIn(min = 48.dp)) { Text("Continue without a map") }
+                    } else {
+                        TextButton(onClick = { confirmNoMap = true }, modifier = Modifier.heightIn(min = 48.dp)) { Text("Skip") }
+                    }
+                }
+            }
+
             Step.CanCant -> {
                 // The range-honesty defense (§7.1). Do not soften this copy into marketing.
                 Heading("What this mesh can and can't do")
@@ -119,6 +148,32 @@ fun OnboardingScreen(initialName: String, onDone: () -> Unit) {
         if (index > 0) {
             TextButton(onClick = { index-- }, modifier = Modifier.heightIn(min = 48.dp)) { Text("Back") }
         }
+    }
+
+    if (confirmNoMap) {
+        AlertDialog(
+            onDismissRequest = { confirmNoMap = false },
+            title = { Text("No offline map?") },
+            text = {
+                Text(
+                    "Without a downloaded map you'll see pins and teammates on a plain grid only, and you can't " +
+                        "download a map once you're out of signal.",
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        confirmNoMap = false
+                        scope.launch { app.settings.setNoMapAcknowledged(true) }
+                        next()
+                    },
+                    modifier = Modifier.heightIn(min = 48.dp),
+                ) { Text("I understand I will have no map offline") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmNoMap = false }, modifier = Modifier.heightIn(min = 48.dp)) { Text("Download a map") }
+            },
+        )
     }
 }
 

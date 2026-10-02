@@ -5,6 +5,7 @@ import dev.offgridmesh.mesh.MeshConfig
 import dev.offgridmesh.sync.ChatMessage
 import dev.offgridmesh.sync.GossipRecord
 import dev.offgridmesh.sync.ObjectType
+import dev.offgridmesh.sync.PinPayload
 import dev.offgridmesh.sync.Presence
 import dev.offgridmesh.sync.SyncSink
 import dev.offgridmesh.sync.WireCodec
@@ -78,9 +79,15 @@ class RoomSyncSink(
         return inserted
     }
 
-    override suspend fun presence(p: Presence, relays: Int, seenAtMs: Long) {
+    override suspend fun presence(p: Presence, relays: Int, seenAtMs: Long, clockSkewMs: Long?) {
         db.nodes().recordContact(p.deviceId, p.displayName, seenAtMs, relays, p.batteryPct)
+        clockSkewMs?.let { db.nodes().setClockSkew(p.deviceId, it) }
+        val lat = p.lat?.takeIf { it in -90.0..90.0 }
+        val lng = p.lng?.takeIf { it in -180.0..180.0 }
+        db.nodes().setLocation(p.deviceId, lat?.takeIf { lng != null }, lng?.takeIf { lat != null }, p.timestampMs)
     }
+
+    override suspend fun pin(p: PinPayload): Boolean = db.pins().applyIfNewer(p.toEntity())
 
     override suspend fun ack(messageId: String, ackerId: String, atMs: Long) {
         db.messages().recordAck(messageId, ackerId, atMs)

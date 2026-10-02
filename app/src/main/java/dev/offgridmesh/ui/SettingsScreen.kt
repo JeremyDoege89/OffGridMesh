@@ -20,6 +20,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
+import androidx.compose.foundation.layout.Row
+import androidx.compose.ui.Alignment
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -43,7 +46,7 @@ import kotlinx.coroutines.launch
 /** Settings (§7.8). Packs, export etc. land with their milestones. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onBack: () -> Unit, onPreTripSetup: () -> Unit) {
+fun SettingsScreen(onBack: () -> Unit, onPreTripSetup: () -> Unit, onOpenPacks: () -> Unit) {
     BackHandler(onBack = onBack)
     val app = LocalContext.current.applicationContext as MeshApp
     val scope = rememberCoroutineScope()
@@ -90,6 +93,22 @@ fun SettingsScreen(onBack: () -> Unit, onPreTripSetup: () -> Unit) {
             )
 
             HorizontalDivider()
+            val share by app.settings.shareLocation.collectAsStateWithLifecycle(initialValue = false)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Share my location", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Teammates see your position on their map. With this off you still appear in the node list " +
+                            "and status board, just not on the map.",
+                    )
+                }
+                Switch(checked = share, onCheckedChange = { on -> scope.launch { app.settings.setShareLocation(on) } })
+            }
+
+            HorizontalDivider()
+            OutlinedButton(onClick = onOpenPacks, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                Text("Map packs")
+            }
             OutlinedButton(onClick = onPreTripSetup, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
                 Text("Pre-trip setup")
             }

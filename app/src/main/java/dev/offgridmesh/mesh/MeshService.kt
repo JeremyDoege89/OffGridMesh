@@ -23,6 +23,7 @@ import dev.offgridmesh.transport.PeerInfo
 import dev.offgridmesh.data.RoomGossipStore
 import dev.offgridmesh.data.RoomSyncSink
 import dev.offgridmesh.sync.ChatMessage
+import dev.offgridmesh.sync.StatusPayload
 import dev.offgridmesh.sync.SyncEngine
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
@@ -77,22 +78,37 @@ class MeshService : LifecycleService() {
         }
         lifecycleScope.launch {
             val me = app.identity.current()
+            val team = app.team.current()
+            val frames = team.frames()
+            if (frames == null) {
+                // No team choice yet (passphrase or open mesh): the UI blocks the toggle; be safe anyway.
+                Log.w(TAG, "team mode unset; not starting")
+                shutdown()
+                return@launch
+            }
+            // A passphrase change mid-session would split the mesh silently: stop and let the user restart.
+            launch {
+                app.team.mode.collect { now -> if (now.frames()?.teamTag != frames.teamTag) shutdown() }
+            }
             var ttl = app.settings.ttlHops.first()
             launch { app.settings.ttlHops.collect { ttl = it } }
             val startedAt = System.currentTimeMillis()
             app.db.gossip().prune(startedAt - MeshConfig.GOSSIP_RETENTION_MS, startedAt - MeshConfig.TOMBSTONE_RETENTION_MS)
             app.db.pins().pruneTombstones(startedAt - MeshConfig.TOMBSTONE_RETENTION_MS)
             app.db.gossip().pruneClamped(startedAt - MeshConfig.TOMBSTONE_RETENTION_MS)
+            app.db.checklists().pruneListTombstones(startedAt - MeshConfig.TOMBSTONE_RETENTION_MS)
+            app.db.checklists().pruneItemTombstones(startedAt - MeshConfig.TOMBSTONE_RETENTION_MS)
 
             val engine = SyncEngine(
                 selfId = me.deviceId,
                 store = RoomGossipStore(app.db.gossip()),
-                sink = RoomSyncSink(app.db, me.deviceId, ::notifyMessage),
+                sink = RoomSyncSink(app.db, me.deviceId, ::notifyMessage, ::notifyHelp),
                 link = newCore,
                 ttlHops = { ttl },
+                crypto = frames,
             )
             newCore.listener = engine
-            newCore.start(PeerInfo(me.deviceId, me.displayName.ifBlank { "Unnamed" }))
+            newCore.start(PeerInfo(me.deviceId, me.displayName.ifBlank { "Unnamed" }, frames.teamTag), frames.encrypted)
 
             launch { app.outbox.collect { engine.push(it) } }
             launch {
@@ -159,6 +175,34 @@ class MeshService : LifecycleService() {
         }
     }
 
+    /** NEED_HELP is the loudest object in the system (§9): always notified, even with the app open. */
+    private fun notifyHelp(s: StatusPayload, needsHelp: Boolean) {
+        val nm = NotificationManagerCompat.from(this)
+        val id = HELP_NOTIFICATION_BASE + (s.deviceId.hashCode() and 0xffff)
+        if (!needsHelp) {
+            nm.cancel(id)
+            return
+        }
+        if (!canNotify()) return
+        val who = s.displayName.ifBlank { "A teammate" }
+        val n = NotificationCompat.Builder(this, HELP_CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_mesh)
+            .setContentTitle(getString(R.string.help_title, who))
+            .setContentText(s.note ?: getString(R.string.help_text))
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setColor(0xFFD32F2F.toInt())
+            .setAutoCancel(true)
+            .setContentIntent(
+                PendingIntent.getActivity(
+                    this, 3, Intent(this, MainActivity::class.java).putExtra(MainActivity.EXTRA_TAB, "STATUS"),
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+                ),
+            )
+            .build()
+        nm.notify(id, n)
+    }
+
     private fun batteryPct(): Int? =
         (getSystemService(BATTERY_SERVICE) as BatteryManager)
             .getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
@@ -191,6 +235,8 @@ class MeshService : LifecycleService() {
         private const val NOTIFICATION_ID = 1
         private const val MESSAGES_CHANNEL_ID = "messages"
         private const val MESSAGE_NOTIFICATION_ID = 2
+        private const val HELP_CHANNEL_ID = "help"
+        private const val HELP_NOTIFICATION_BASE = 0x10000
         private const val ACTION_STOP = "dev.offgridmesh.STOP"
 
         fun createChannel(context: Context) {
@@ -201,7 +247,14 @@ class MeshService : LifecycleService() {
             val messages = NotificationChannel(
                 MESSAGES_CHANNEL_ID, context.getString(R.string.channel_messages), NotificationManager.IMPORTANCE_DEFAULT,
             )
-            context.getSystemService(NotificationManager::class.java).createNotificationChannels(listOf(channel, messages))
+            val help = NotificationChannel(
+                HELP_CHANNEL_ID, context.getString(R.string.channel_help), NotificationManager.IMPORTANCE_HIGH,
+            ).apply {
+                description = context.getString(R.string.channel_help_desc)
+                enableVibration(true)
+                vibrationPattern = longArrayOf(0, 600, 300, 600, 300, 600)
+            }
+            context.getSystemService(NotificationManager::class.java).createNotificationChannels(listOf(channel, messages, help))
         }
 
         fun start(context: Context) {

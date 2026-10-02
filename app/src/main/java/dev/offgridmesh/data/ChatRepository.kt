@@ -6,6 +6,10 @@ import dev.offgridmesh.sync.ChatMessage
 import dev.offgridmesh.sync.GossipRecord
 import dev.offgridmesh.sync.ObjectType
 import dev.offgridmesh.sync.PinPayload
+import dev.offgridmesh.sync.ChecklistItemPayload
+import dev.offgridmesh.sync.ChecklistPayload
+import dev.offgridmesh.sync.MemberState
+import dev.offgridmesh.sync.StatusPayload
 import dev.offgridmesh.sync.Presence
 import dev.offgridmesh.sync.SyncSink
 import dev.offgridmesh.sync.WireCodec
@@ -65,6 +69,8 @@ class RoomSyncSink(
     private val db: MeshDatabase,
     private val selfId: String,
     private val onNewMessage: (ChatMessage) -> Unit = {},
+    /** A member newly needs help (true) or cleared their call (false). */
+    private val onHelp: (StatusPayload, Boolean) -> Unit = { _, _ -> },
 ) : SyncSink {
     override suspend fun message(m: ChatMessage, relays: Int, viaDeviceId: String?, receivedAtMs: Long): Boolean {
         val inserted = db.messages().insert(
@@ -88,6 +94,21 @@ class RoomSyncSink(
     }
 
     override suspend fun pin(p: PinPayload): Boolean = db.pins().applyIfNewer(p.toEntity())
+
+    override suspend fun checklist(c: ChecklistPayload): Boolean = db.checklists().applyListIfNewer(c.toEntity())
+
+    override suspend fun checklistItem(i: ChecklistItemPayload): Boolean = db.checklists().applyItemIfNewer(i.toEntity())
+
+    override suspend fun status(s: StatusPayload): Boolean {
+        val (applied, old) = db.statuses().applyIfNewer(s.toEntity())
+        if (!applied) return false
+        val wasHelp = old?.state == MemberState.NEED_HELP
+        when {
+            s.state == MemberState.NEED_HELP && !wasHelp -> onHelp(s, true)
+            s.state == MemberState.OK && wasHelp -> onHelp(s, false)
+        }
+        return true
+    }
 
     override suspend fun ack(messageId: String, ackerId: String, atMs: Long) {
         db.messages().recordAck(messageId, ackerId, atMs)

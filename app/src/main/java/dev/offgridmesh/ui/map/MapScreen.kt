@@ -50,6 +50,11 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.offgridmesh.MeshApp
 import dev.offgridmesh.data.MapPack
 import dev.offgridmesh.data.Node
+import dev.offgridmesh.data.MemberStatusEntity
+import dev.offgridmesh.billing.ProState
+import dev.offgridmesh.mesh.MeshState
+import dev.offgridmesh.ui.buildRoster
+import dev.offgridmesh.ui.capRoster
 import dev.offgridmesh.data.PinRow
 import dev.offgridmesh.maps.Bbox
 import dev.offgridmesh.maps.MapGeo
@@ -77,15 +82,25 @@ data class MapUi(
     val nodes: List<Node> = emptyList(),
     val shareLocation: Boolean = false,
     val loaded: Boolean = false,
+    val selfId: String = "",
+    val statuses: List<MemberStatusEntity> = emptyList(),
+    val pro: ProState = ProState.FREE,
+    val mesh: MeshState = MeshState(),
 )
 
 class MapViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as MeshApp
     val ui = combine(
-        app.mapPacks.packs, app.pins.observe(), app.db.nodes().observeAll(), app.identity.identity, app.settings.shareLocation,
-    ) { packs, pins, nodes, me, share ->
-        MapUi(packs, pins, nodes.filter { it.deviceId != me.deviceId }, share, loaded = true)
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MapUi())
+        combine(
+            app.mapPacks.packs, app.pins.observe(), app.db.nodes().observeAll(), app.identity.identity, app.settings.shareLocation,
+        ) { packs, pins, nodes, me, share ->
+            MapUi(packs, pins, nodes.filter { it.deviceId != me.deviceId }, share, loaded = true, selfId = me.deviceId)
+        },
+        app.status.observeAll(),
+        app.pro.status,
+        app.meshState,
+    ) { base, statuses, pro, mesh -> base.copy(statuses = statuses, pro = pro.state, mesh = mesh) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MapUi())
 
     fun packFile(p: MapPack) = app.mapPacks.file(p)
     fun create(lat: Double, lng: Double, label: String, type: PinType) = viewModelScope.launch { app.pins.create(lat, lng, label, type) }
@@ -214,15 +229,18 @@ fun MapScreen(onOpenPacks: () -> Unit, vm: MapViewModel = viewModel()) {
             MapGeo.points(ui.pins.map { MapGeo.Point(it.lat, it.lng, mapOf("id" to it.id, "label" to it.label, "type" to it.type.name)) }),
         )
     }
-    LaunchedEffect(style, ui.nodes, now) {
-        style?.getSourceAs<GeoJsonSource>(MapStyle.NODES)?.setGeoJson(
-            MapGeo.points(
-                ui.nodes.filter { it.lat != null && it.lng != null }.map {
-                    val stale = now - (it.locationAtMs ?: 0) > MeshConfig.OFFLINE_AFTER_MS
-                    MapGeo.Point(it.lat!!, it.lng!!, mapOf("name" to it.displayName.ifBlank { "Unnamed" }, "stale" to stale))
-                },
-            ),
-        )
+    LaunchedEffect(style, ui.nodes, ui.statuses, ui.pro, now) {
+        // Same free-tier roster as the lists (§2); help calls always show, at the position sent with the call.
+        val (visible, _) = capRoster(buildRoster(ui.selfId, "", ui.nodes, ui.statuses, ui.mesh, now), ui.pro)
+        val points = visible.filter { !it.isSelf }.mapNotNull { m ->
+            val help = m.needsHelp
+            val lat = (if (help) m.status?.lat else null) ?: m.node?.lat
+            val lng = (if (help) m.status?.lng else null) ?: m.node?.lng
+            if (lat == null || lng == null) return@mapNotNull null
+            val stale = !help && now - (m.node?.locationAtMs ?: 0) > MeshConfig.OFFLINE_AFTER_MS
+            MapGeo.Point(lat, lng, mapOf("name" to if (help) "${m.name} — NEEDS HELP" else m.name, "stale" to stale, "help" to help))
+        }
+        style?.getSourceAs<GeoJsonSource>(MapStyle.NODES)?.setGeoJson(MapGeo.points(points))
     }
     val centerCovered = center != null && covering(ui.packs, center.first, center.second) != null
     LaunchedEffect(style, visible, centerCovered) {

@@ -40,13 +40,16 @@ import dev.offgridmesh.BuildConfig
 import dev.offgridmesh.MeshApp
 import dev.offgridmesh.data.IdentityStore
 import dev.offgridmesh.mesh.MeshConfig
+import dev.offgridmesh.billing.Entitlements
+import dev.offgridmesh.billing.ProFeature
+import dev.offgridmesh.crypto.TeamMode
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 
 /** Settings (§7.8). Packs, export etc. land with their milestones. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onBack: () -> Unit, onPreTripSetup: () -> Unit, onOpenPacks: () -> Unit) {
+fun SettingsScreen(onBack: () -> Unit, onPreTripSetup: () -> Unit, onOpenPacks: () -> Unit, onOpenTeam: () -> Unit) {
     BackHandler(onBack = onBack)
     val app = LocalContext.current.applicationContext as MeshApp
     val scope = rememberCoroutineScope()
@@ -85,9 +88,15 @@ fun SettingsScreen(onBack: () -> Unit, onPreTripSetup: () -> Unit, onOpenPacks: 
                 "How many phone-to-phone hops your messages may travel. More hops reach further but cost every " +
                     "relay battery. Default ${MeshConfig.DEFAULT_TTL_HOPS}.",
             )
+            val pro by app.pro.status.collectAsStateWithLifecycle()
             Slider(
                 value = ttl.toFloat(),
-                onValueChange = { v -> scope.launch { app.settings.setTtlHops(v.roundToInt()) } },
+                onValueChange = { v ->
+                    val hops = v.roundToInt()
+                    // 4–5 hops is Pro (§2); the gate is here in the UI, never in the mesh service (§11).
+                    if (Entitlements.canUseTtl(pro.state, hops)) scope.launch { app.settings.setTtlHops(hops) }
+                    else app.requestPaywall(ProFeature.TTL)
+                },
                 valueRange = MeshConfig.TTL_RANGE.first.toFloat()..MeshConfig.TTL_RANGE.last.toFloat(),
                 steps = MeshConfig.TTL_RANGE.last - MeshConfig.TTL_RANGE.first - 1,
             )
@@ -106,6 +115,29 @@ fun SettingsScreen(onBack: () -> Unit, onPreTripSetup: () -> Unit, onOpenPacks: 
             }
 
             HorizontalDivider()
+            val team by app.team.mode.collectAsStateWithLifecycle(initialValue = null)
+            Text("Team security", style = MaterialTheme.typography.titleMedium)
+            Text(
+                when (team) {
+                    is TeamMode.Passphrase -> "🔒 Team passphrase encryption"
+                    TeamMode.Open -> "🔓 Open mesh — anyone nearby with the app can read everything"
+                    else -> "Not set — the mesh can't start until you choose."
+                },
+            )
+            OutlinedButton(onClick = onOpenTeam, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                Text(if (team is TeamMode.Passphrase) "Change team passphrase" else "Set up team")
+            }
+
+            HorizontalDivider()
+            Text("Pro", style = MaterialTheme.typography.titleMedium)
+            Text(if (pro.isPro) "Pro is unlocked on this phone." else "Free: 8 members, 1 map area, relay up to 3 hops.")
+            if (!pro.isPro) {
+                OutlinedButton(onClick = { app.requestPaywall(null) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                    Text("See Pro")
+                }
+            }
+
+            HorizontalDivider()
             OutlinedButton(onClick = onOpenPacks, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
                 Text("Map packs")
             }
@@ -116,6 +148,7 @@ fun SettingsScreen(onBack: () -> Unit, onPreTripSetup: () -> Unit, onOpenPacks: 
             HorizontalDivider()
             Text("About", style = MaterialTheme.typography.titleMedium)
             Text("Mesh transport: Google Nearby Connections — requires Google Play Services.")
+            Text("Security: team passphrase encryption (AES-256-GCM, key from PBKDF2). Not end-to-end; anyone with the passphrase can read team traffic.")
             Text(
                 "Everything stays on your team's phones. There is no server and no account; the developer can't see " +
                     "your messages, pins or locations because there is nowhere for them to go.",

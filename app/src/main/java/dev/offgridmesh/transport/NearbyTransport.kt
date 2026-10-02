@@ -117,6 +117,11 @@ class NearbyTransport(context: Context) : MeshTransport {
             .addOnFailureListener { emit(TransportEvent.ConnectFailed(endpointId, "request: ${it.message}")) }
     }
 
+    override fun disconnect(endpointId: String) {
+        client.disconnectFromEndpoint(endpointId)
+        emit(TransportEvent.Disconnected(endpointId))
+    }
+
     override fun send(endpointId: String, bytes: ByteArray) {
         client.sendPayload(endpointId, Payload.fromBytes(bytes))
             .addOnFailureListener { Log.w(TAG, "send to $endpointId failed", it) }

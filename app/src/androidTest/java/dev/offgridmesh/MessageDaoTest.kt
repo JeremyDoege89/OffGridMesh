@@ -73,7 +73,7 @@ class MessageDaoTest {
 
     @Test fun duplicateReceivedMessageInsertsOnce() = runTest {
         var notified = 0
-        val sink = RoomSyncSink(db, me) { notified++ }
+        val sink = RoomSyncSink(db, me, onNewMessage = { notified++ })
         val m = ChatMessage("r", "b", "Bravo", 5, "hello")
         assertTrue(sink.message(m, 0, null, 6))
         assertFalse(sink.message(m, 1, "c", 7))
@@ -102,6 +102,38 @@ class MessageDaoTest {
             it.query("SELECT COUNT(*) FROM message").use { c -> c.moveToFirst(); assertEquals(1, c.getInt(0)) }
             it.query("SELECT deleted FROM gossip").use { c -> c.moveToFirst(); assertEquals(0, c.getInt(0)) }
             it.query("SELECT lat FROM node").use { c -> c.moveToFirst(); assertTrue(c.isNull(0)) }
+        }
+    }
+
+    @Test fun statusTimestampIsTheWholeRule() = runTest {
+        val dao = db.statuses()
+        val help = dev.offgridmesh.data.MemberStatusEntity("b", "B", dev.offgridmesh.sync.MemberState.NEED_HELP, 50, "ankle", null, null)
+        assertTrue(dao.applyIfNewer(help).first)
+        assertFalse("stale OK loses", dao.applyIfNewer(help.copy(state = dev.offgridmesh.sync.MemberState.OK, updatedAtMs = 40)).first)
+        val (applied, old) = dao.applyIfNewer(help.copy(state = dev.offgridmesh.sync.MemberState.OK, updatedAtMs = 60))
+        assertTrue(applied)
+        assertEquals(dev.offgridmesh.sync.MemberState.NEED_HELP, old!!.state)
+    }
+
+    @Test fun checklistProgressCountsOnlyLiveItems() = runTest {
+        val c = db.checklists()
+        c.upsertList(dev.offgridmesh.data.ChecklistEntity("l", "Camp", "me", 1, 1, "me", false))
+        fun item(id: String, done: Boolean, deleted: Boolean = false) =
+            dev.offgridmesh.data.ChecklistItemEntity(id, "l", id, done, null, null, null, 1, 1, "me", deleted)
+        c.upsertItem(item("a", true)); c.upsertItem(item("b", false)); c.upsertItem(item("x", true, deleted = true))
+        val row = c.observeLists().first().single()
+        assertEquals(2, row.total)
+        assertEquals(1, row.done)
+        assertFalse(c.applyItemIfNewer(item("a", false).copy(updatedAtMs = 1, editorId = "a-lower")))
+    }
+
+    @Test fun migrate3To4AddsChecklistAndStatusTables() {
+        migrations.createDatabase("mig4.db", 3).use {
+            it.execSQL("INSERT INTO node (deviceId, displayName, lastSeenMs, hopCount, batteryPct) VALUES ('b', 'Bravo', 10, 0, 41)")
+        }
+        migrations.runMigrationsAndValidate("mig4.db", 4, true).use {
+            it.query("SELECT COUNT(*) FROM member_status").use { c -> c.moveToFirst(); assertEquals(0, c.getInt(0)) }
+            it.query("SELECT displayName FROM node").use { c -> c.moveToFirst(); assertEquals("Bravo", c.getString(0)) }
         }
     }
 

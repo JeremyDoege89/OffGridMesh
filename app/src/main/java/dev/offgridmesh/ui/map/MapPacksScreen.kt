@@ -35,6 +35,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.offgridmesh.MeshApp
 import dev.offgridmesh.data.MapPack
+import dev.offgridmesh.billing.Entitlements
+import dev.offgridmesh.billing.ProFeature
 import kotlinx.coroutines.launch
 
 /** Downloaded packs with size, zoom range and per-pack delete (§6). */
@@ -82,7 +84,10 @@ fun MapPacksScreen(onBack: () -> Unit, onDownload: () -> Unit) {
                 Text("Free space on this phone: ${formatBytes(free)}", style = MaterialTheme.typography.bodySmall)
             }
         }
-        Button(onClick = onDownload, modifier = Modifier.fillMaxWidth().padding(16.dp).heightIn(min = 56.dp)) {
+        val pro by app.pro.status.collectAsStateWithLifecycle()
+        Button(onClick = {
+            if (Entitlements.canAddMapPack(pro.state, packs.size)) onDownload() else app.requestPaywall(ProFeature.MAP_PACKS)
+        }, modifier = Modifier.fillMaxWidth().padding(16.dp).heightIn(min = 56.dp)) {
             Text("Download a map area")
         }
     }

@@ -33,12 +33,15 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.offgridmesh.MeshApp
 import dev.offgridmesh.data.IdentityStore
+import dev.offgridmesh.billing.Entitlements
+import dev.offgridmesh.billing.ProFeature
 import dev.offgridmesh.mesh.MeshConfig
 import dev.offgridmesh.mesh.PermissionGroup
 import kotlinx.coroutines.launch
 
 private sealed interface Step {
     data object Name : Step
+    data object Team : Step
     data class Permission(val group: PermissionGroup) : Step
     data object MapPack : Step
     data object CanCant : Step
@@ -53,6 +56,7 @@ fun OnboardingScreen(initialName: String, onDownloadMap: () -> Unit, onDone: () 
     val steps = remember {
         buildList {
             add(Step.Name)
+            add(Step.Team)
             PermissionGroup.entries.filter { it.applicable }.forEach { add(Step.Permission(it)) }
             add(Step.MapPack)
             add(Step.CanCant)
@@ -88,6 +92,8 @@ fun OnboardingScreen(initialName: String, onDownloadMap: () -> Unit, onDone: () 
                 }
             }
 
+            Step.Team -> TeamSetupContent(onDone = { next() })
+
             is Step.Permission -> {
                 val (title, body) = rationale(step.group)
                 Heading(title)
@@ -112,7 +118,13 @@ fun OnboardingScreen(initialName: String, onDownloadMap: () -> Unit, onDone: () 
                 if (have.isNotEmpty()) {
                     Text("Downloaded: " + have.joinToString { it.name }, fontWeight = FontWeight.Bold)
                     BigButton("Continue") { next() }
-                    TextButton(onClick = onDownloadMap, modifier = Modifier.heightIn(min = 48.dp)) { Text("Download another area") }
+                    val pro by app.pro.status.collectAsStateWithLifecycle()
+                    TextButton(
+                        onClick = {
+                            if (Entitlements.canAddMapPack(pro.state, have.size)) onDownloadMap() else app.requestPaywall(ProFeature.MAP_PACKS)
+                        },
+                        modifier = Modifier.heightIn(min = 48.dp),
+                    ) { Text("Download another area") }
                 } else {
                     BigButton("Choose area to download", onClick = onDownloadMap)
                     if (noMapAcknowledged) {

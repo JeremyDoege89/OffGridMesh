@@ -5,6 +5,8 @@ import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import dev.offgridmesh.crypto.FrameCrypto
+import dev.offgridmesh.crypto.OpenFrames
 import dev.offgridmesh.mesh.MeshConfig
 import dev.offgridmesh.mesh.MeshListener
 
@@ -54,6 +56,10 @@ interface SyncSink {
     /** Returns true when this version was applied (it was newer than what the phone had). */
     suspend fun pin(p: PinPayload): Boolean
 
+    suspend fun checklist(c: ChecklistPayload): Boolean
+    suspend fun checklistItem(i: ChecklistItemPayload): Boolean
+    suspend fun status(s: StatusPayload): Boolean
+
     /** A receipt for one of our own messages. */
     suspend fun ack(messageId: String, ackerId: String, atMs: Long)
     /** One of our own messages was handed to a connected peer for the first time (Queued → Relayed). */
@@ -75,7 +81,8 @@ interface PeerLink {
  *   connected peer if TTL remains. A relay sends ttl−1, so TTL 3 reaches at most three radio hops.
  * - Local objects go through [originate]; anything not yet handed on is picked up by the next inventory.
  *
- * Unknown object types from newer builds are stored and relayed untouched.
+ * Malformed payloads are dropped, not relayed. An object type added by a newer build fails to decode here
+ * (its enum number is unknown), so new types need every phone updated — note it in release notes.
  */
 class SyncEngine(
     private val selfId: String,
@@ -84,7 +91,15 @@ class SyncEngine(
     private val link: PeerLink,
     private val clock: () -> Long = System::currentTimeMillis,
     private val ttlHops: () -> Int = { MeshConfig.DEFAULT_TTL_HOPS },
+    /** Seals every frame on the way out and opens it on the way in; each hop re-seals (§10). */
+    private val crypto: FrameCrypto = OpenFrames,
 ) : MeshListener {
+    /** Frames that failed to open: a peer on another passphrase, or tampering. Shown only in logs. */
+    var rejectedFrames = 0
+        private set
+
+    private fun sendFrame(endpointId: String, plain: ByteArray) = link.send(endpointId, crypto.seal(plain))
+
     override suspend fun onConnected(endpointId: String) {
         val entries = store.relayable(clock() - MeshConfig.GOSSIP_RETENTION_MS, MeshConfig.INVENTORY_MAX_ENTRIES)
         entries.chunked(MeshConfig.INVENTORY_PAGE).forEach { page ->
@@ -93,7 +108,13 @@ class SyncEngine(
     }
 
     override suspend fun onReceived(endpointId: String, bytes: ByteArray) {
-        val env = WireCodec.decode(bytes) ?: return
+        val plain = crypto.open(bytes)
+        if (plain == null) {
+            rejectedFrames++
+            Log.w(TAG, "dropped a frame from $endpointId that doesn't open with this team's key")
+            return
+        }
+        val env = WireCodec.decode(plain) ?: return
         when (env.objectType) {
             ObjectType.INVENTORY -> {
                 val inv = WireCodec.decodePayload<Inventory>(env.payload) ?: return
@@ -168,6 +189,24 @@ class SyncEngine(
                 deleted = p.deleted
                 sink.pin(p.copy(updatedAtMs = version, label = p.label.take(PinPayload.MAX_LABEL)))
             }
+            ObjectType.CHECKLIST -> {
+                val c = WireCodec.decodePayload<ChecklistPayload>(env.payload) ?: return
+                if (c.id != env.objectId) return
+                deleted = c.deleted
+                sink.checklist(c.copy(updatedAtMs = version, title = c.title.take(ChecklistPayload.MAX_TITLE)))
+            }
+            ObjectType.CHECKLIST_ITEM -> {
+                val i = WireCodec.decodePayload<ChecklistItemPayload>(env.payload) ?: return
+                if (i.id != env.objectId) return
+                deleted = i.deleted
+                sink.checklistItem(i.copy(updatedAtMs = version, text = i.text.take(ChecklistItemPayload.MAX_TEXT)))
+            }
+            ObjectType.STATUS -> {
+                val st = WireCodec.decodePayload<StatusPayload>(env.payload) ?: return
+                // Nobody can set or clear someone else's status.
+                if (st.deviceId != env.senderId || env.objectId != StatusPayload.objectId(st.deviceId)) return
+                sink.status(st.copy(updatedAtMs = version, note = st.note?.take(StatusPayload.MAX_NOTE)))
+            }
             else -> Unit
         }
 
@@ -231,12 +270,12 @@ class SyncEngine(
     }
 
     private suspend fun sendRecord(endpointId: String, rec: GossipRecord) {
-        link.send(endpointId, WireCodec.encode(rec.toEnvelope()))
+        sendFrame(endpointId, WireCodec.encode(rec.toEnvelope()))
         if (rec.objectType == ObjectType.MESSAGE && rec.senderId == selfId) sink.relayed(rec.objectId, clock())
     }
 
     private fun sendControl(endpointId: String, type: ObjectType, payload: ByteArray) {
-        link.send(endpointId, WireCodec.encode(Envelope(type, "", selfId, clock(), 0, payload)))
+        sendFrame(endpointId, WireCodec.encode(Envelope(type, "", selfId, clock(), 0, payload)))
     }
 
     private companion object {

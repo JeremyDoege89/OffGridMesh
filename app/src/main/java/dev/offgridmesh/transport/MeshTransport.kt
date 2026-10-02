@@ -24,6 +24,8 @@ interface MeshTransport {
 
     fun connect(endpointId: String)
 
+    fun disconnect(endpointId: String)
+
     fun send(endpointId: String, bytes: ByteArray)
 }
 

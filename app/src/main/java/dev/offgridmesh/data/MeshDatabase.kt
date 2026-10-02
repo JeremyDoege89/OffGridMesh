@@ -11,11 +11,13 @@ import dev.offgridmesh.sync.GossipRecord
 @Database(
     entities = [
         Node::class, GossipRecord::class, MessageEntity::class, MessageRecipient::class, PinEntity::class, MapPack::class,
-        ClampedEdit::class,
+        ClampedEdit::class, ChecklistEntity::class, ChecklistItemEntity::class, MemberStatusEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = true,
-    autoMigrations = [AutoMigration(from = 1, to = 2), AutoMigration(from = 2, to = 3)],
+    autoMigrations = [AutoMigration(from = 1, to = 2), AutoMigration(from = 2, to = 3),
+        AutoMigration(from = 3, to = 4),
+    ],
 )
 abstract class MeshDatabase : RoomDatabase() {
     abstract fun nodes(): NodeDao
@@ -23,6 +25,8 @@ abstract class MeshDatabase : RoomDatabase() {
     abstract fun messages(): MessageDao
     abstract fun pins(): PinDao
     abstract fun mapPacks(): MapPackDao
+    abstract fun checklists(): ChecklistDao
+    abstract fun statuses(): MemberStatusDao
 
     companion object {
         fun create(context: Context): MeshDatabase =

@@ -123,6 +123,68 @@ data class PinPayload(
     }
 }
 
+/** A shared checklist (§5.4). Items are separate objects so two people can tick different items at once. */
+@Serializable
+data class ChecklistPayload(
+    @ProtoNumber(1) val id: String,
+    @ProtoNumber(2) val title: String,
+    @ProtoNumber(3) val creatorId: String,
+    @ProtoNumber(4) val createdAtMs: Long,
+    @ProtoNumber(5) val updatedAtMs: Long,
+    @ProtoNumber(6) val editorId: String,
+    @ProtoNumber(7) val deleted: Boolean = false,
+) {
+    companion object {
+        const val MAX_TITLE = 80
+    }
+}
+
+/** One checklist line; last-write-wins per item (§5.4, §5.6). */
+@Serializable
+data class ChecklistItemPayload(
+    @ProtoNumber(1) val id: String,
+    @ProtoNumber(2) val checklistId: String,
+    @ProtoNumber(3) val text: String,
+    @ProtoNumber(4) val done: Boolean,
+    @ProtoNumber(5) val doneBy: String? = null,
+    @ProtoNumber(6) val doneByName: String? = null,
+    @ProtoNumber(7) val doneAtMs: Long? = null,
+    @ProtoNumber(8) val createdAtMs: Long,
+    @ProtoNumber(9) val updatedAtMs: Long,
+    @ProtoNumber(10) val editorId: String,
+    @ProtoNumber(11) val deleted: Boolean = false,
+) {
+    companion object {
+        const val MAX_TEXT = 120
+    }
+}
+
+@Serializable
+enum class MemberState {
+    @ProtoNumber(1) OK,
+    @ProtoNumber(2) NEED_HELP,
+}
+
+/**
+ * A member's own status (§5.5). Only that member sets or clears it (receivers enforce deviceId == sender);
+ * OFFLINE is never sent — it is derived from silence.
+ */
+@Serializable
+data class StatusPayload(
+    @ProtoNumber(1) val deviceId: String,
+    @ProtoNumber(2) val displayName: String,
+    @ProtoNumber(3) val state: MemberState,
+    @ProtoNumber(4) val updatedAtMs: Long,
+    @ProtoNumber(5) val note: String? = null,
+    @ProtoNumber(6) val lat: Double? = null,
+    @ProtoNumber(7) val lng: Double? = null,
+) {
+    companion object {
+        const val MAX_NOTE = 80
+        fun objectId(deviceId: String) = "status:$deviceId"
+    }
+}
+
 @Serializable
 data class InventoryEntry(
     @ProtoNumber(1) val objectId: String,

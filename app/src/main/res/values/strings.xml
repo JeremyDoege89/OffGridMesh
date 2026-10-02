@@ -8,4 +8,8 @@
     <string name="notif_text">Relaying for your team. Tap Stop to turn the mesh off.</string>
     <string name="notif_stop">Stop</string>
     <string name="channel_messages">Team messages</string>
+    <string name="channel_help">Help calls</string>
+    <string name="channel_help_desc">A teammate pressed "I need help". Loud on purpose.</string>
+    <string name="help_title">%1$s needs help</string>
+    <string name="help_text">Open the status board to see where and when.</string>
 </resources>

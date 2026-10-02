@@ -8,6 +8,14 @@ import dev.offgridmesh.sync.GossipStore
 import dev.offgridmesh.sync.InventoryEntry
 import dev.offgridmesh.sync.ObjectType
 import dev.offgridmesh.sync.PinPayload
+import dev.offgridmesh.sync.ChecklistItemPayload
+import dev.offgridmesh.sync.ChecklistPayload
+import dev.offgridmesh.sync.MemberState
+import dev.offgridmesh.sync.StatusPayload
+import dev.offgridmesh.crypto.AesGcmFrames
+import dev.offgridmesh.crypto.FrameCrypto
+import dev.offgridmesh.crypto.OpenFrames
+import dev.offgridmesh.crypto.TeamCrypto
 import dev.offgridmesh.sync.PinType
 import dev.offgridmesh.sync.Presence
 import dev.offgridmesh.sync.SyncEngine
@@ -47,6 +55,27 @@ private class MemSink : SyncSink {
     val acks = mutableSetOf<Pair<String, String>>()
     val relayed = mutableSetOf<String>()
     val pins = mutableMapOf<String, PinPayload>()
+    val lists = mutableMapOf<String, ChecklistPayload>()
+    val items = mutableMapOf<String, ChecklistItemPayload>()
+    val statuses = mutableMapOf<String, StatusPayload>()
+    val helpEvents = mutableListOf<Pair<String, Boolean>>()
+    override suspend fun checklist(c: ChecklistPayload): Boolean = lww(lists, c.id, c, c.updatedAtMs, c.editorId) { it.updatedAtMs to it.editorId }
+    override suspend fun checklistItem(i: ChecklistItemPayload): Boolean = lww(items, i.id, i, i.updatedAtMs, i.editorId) { it.updatedAtMs to it.editorId }
+    override suspend fun status(s: StatusPayload): Boolean {
+        val old = statuses[s.deviceId]
+        if (old != null && old.updatedAtMs >= s.updatedAtMs) return false
+        statuses[s.deviceId] = s
+        val wasHelp = old?.state == MemberState.NEED_HELP
+        if (s.state == MemberState.NEED_HELP && !wasHelp) helpEvents += s.deviceId to true
+        if (s.state == MemberState.OK && wasHelp) helpEvents += s.deviceId to false
+        return true
+    }
+    private fun <T> lww(m: MutableMap<String, T>, id: String, v: T, at: Long, ed: String, key: (T) -> Pair<Long, String>): Boolean {
+        val old = m[id]?.let(key)
+        if (old != null && (old.first > at || (old.first == at && old.second >= ed))) return false
+        m[id] = v
+        return true
+    }
     override suspend fun pin(p: PinPayload): Boolean {
         val old = pins[p.id]
         if (old != null && (old.updatedAtMs > p.updatedAtMs || (old.updatedAtMs == p.updatedAtMs && old.editorId >= p.editorId))) return false
@@ -70,7 +99,14 @@ private class MemSink : SyncSink {
 class SyncEngineTest {
     private fun uuid(n: Int) = "00000000-0000-0000-0000-00000000000$n"
 
-    private inner class Phone(val air: FakeAir, val name: String, val id: String, val scope: TestScope, var ttl: Int = 3) {
+    private inner class Phone(
+        val air: FakeAir,
+        val name: String,
+        val id: String,
+        val scope: TestScope,
+        var ttl: Int = 3,
+        var crypto: FrameCrypto = OpenFrames,
+    ) {
         val radio = FakeRadio(air, name)
         var store = MemStore()
         val sink = MemSink()
@@ -79,9 +115,9 @@ class SyncEngineTest {
 
         fun boot() {
             core = MeshCore(radio, FakeNodes(), scope.backgroundScope, clock = { scope.testScheduler.currentTime })
-            engine = SyncEngine(id, store, sink, core, clock = { scope.testScheduler.currentTime }, ttlHops = { ttl })
+            engine = SyncEngine(id, store, sink, core, clock = { scope.testScheduler.currentTime }, ttlHops = { ttl }, crypto = crypto)
             core.listener = engine
-            core.start(PeerInfo(id, name))
+            core.start(PeerInfo(id, name, crypto.teamTag), crypto.encrypted)
         }
 
         suspend fun say(text: String): String {
@@ -222,17 +258,16 @@ class SyncEngineTest {
         assertTrue(b.sink.messages.single().m.timestampMs <= testScheduler.currentTime + 24L * 60 * 60_000)
     }
 
-    @Test fun unknownTypesAreStoredAndRelayedUntouched() = runTest {
+    @Test fun malformedPayloadIsDroppedNotRelayed() = runTest {
         val (a, b, c) = line("A", "B", "C")
         listOf(a, b, c).forEach { it.boot() }
         runCurrent()
-        // CHECKLIST has no handler yet (M4): it must still travel intact.
         a.engine.originate(ObjectType.CHECKLIST, "list-1", 5, byteArrayOf(1, 2, 3))
         runCurrent()
-        assertEquals(listOf<Byte>(1, 2, 3), c.store.map["list-1"]!!.payload.toList())
+        assertNull(b.store.map["list-1"])
+        assertNull(c.store.map["list-1"])
     }
 
-    /** Like PinRepository: the local row changes, then the version goes out. */
     private suspend fun Phone.pin(p: PinPayload) {
         sink.pin(p)
         engine.originate(ObjectType.PIN, p.id, p.updatedAtMs, WireCodec.encodePayload(p), deleted = p.deleted)
@@ -325,5 +360,126 @@ class SyncEngineTest {
         a.engine.originate(ObjectType.PRESENCE, a.id, p.timestampMs, WireCodec.encodePayload(p))
         runCurrent()
         assertEquals(2 * 24 * 60 * 60_000L, b.sink.skew[a.id])
+    }
+
+    // ---- M4: encryption ----
+
+    private val keyA = TeamCrypto.deriveKey("correct horse battery staple", iterations = 1_000)
+    private val keyB = TeamCrypto.deriveKey("a different passphrase entirely", iterations = 1_000)
+
+    @Test fun samePassphraseTeamSyncsEncrypted() = runTest {
+        val (a, b, c) = line("A", "B", "C")
+        listOf(a, b, c).forEach { it.crypto = AesGcmFrames(keyA); it.boot() }
+        runCurrent()
+        a.say("secret plan")
+        runCurrent()
+        assertEquals("secret plan", c.sink.messages.single().m.text)
+        assertTrue(a.core.state.value.encrypted)
+    }
+
+    @Test fun differentPassphraseNeverConnectsAndIsCounted() = runTest {
+        val (a, b) = line("A", "B")
+        a.crypto = AesGcmFrames(keyA); b.crypto = AesGcmFrames(keyB)
+        a.boot(); b.boot()
+        runCurrent()
+        assertTrue(a.core.state.value.connectedDeviceIds.isEmpty())
+        assertEquals(1, a.core.state.value.foreignNearby)
+        assertEquals(1, b.core.state.value.foreignNearby)
+        a.say("hello?")
+        runCurrent()
+        assertTrue(b.sink.messages.isEmpty())
+    }
+
+    @Test fun openMeshAndPassphraseTeamsDontMix() = runTest {
+        val (a, b) = line("A", "B")
+        a.crypto = AesGcmFrames(keyA)
+        a.boot(); b.boot()
+        runCurrent()
+        assertTrue(a.core.state.value.connectedDeviceIds.isEmpty())
+        assertEquals(1, b.core.state.value.foreignNearby)
+    }
+
+    @Test fun framesSealedWithAnotherKeyAreDropped() = runTest {
+        // Even if a foreign phone gets a link (e.g. same advertised tag by chance), nothing it sends is read.
+        val (a, b) = line("A", "B")
+        a.crypto = AesGcmFrames(keyA); b.crypto = AesGcmFrames(keyA)
+        a.boot(); b.boot()
+        runCurrent()
+        val bEndpoint = a.core.connectedPeers().keys.single()
+        val forged = AesGcmFrames(keyB).seal(WireCodec.encode(dev.offgridmesh.sync.Envelope(ObjectType.MESSAGE, "x", "y", 1, 3, byteArrayOf())))
+        a.engine.onReceived(bEndpoint, forged)
+        assertEquals(1, a.engine.rejectedFrames)
+        assertTrue(a.sink.messages.isEmpty())
+    }
+
+    // ---- M4: checklists ----
+
+    private suspend fun Phone.item(i: ChecklistItemPayload) {
+        sink.checklistItem(i)
+        engine.originate(ObjectType.CHECKLIST_ITEM, i.id, i.updatedAtMs, WireCodec.encodePayload(i), deleted = i.deleted)
+    }
+
+    @Test fun partitionedChecklistEditsLaterTimestampWinsAndDoneByIsRight() = runTest {
+        // §13 M4 acceptance: B and C edit the same item while separated; on rejoin the later one wins everywhere.
+        val (a, b, c) = line("A", "B", "C")
+        listOf(a, b, c).forEach { it.boot() }
+        runCurrent()
+        val base = ChecklistItemPayload("i1", "list1", "Generator fueled?", false, createdAtMs = 1, updatedAtMs = 1, editorId = a.id)
+        a.item(base)
+        runCurrent()
+        b.core.stop(); runCurrent()
+        // C (out of range) ticks it at t=20; B ticks it earlier at t=10 while also cut off.
+        c.item(base.copy(done = true, doneBy = c.id, doneByName = "C", doneAtMs = 20, updatedAtMs = 20, editorId = c.id))
+        b.item(base.copy(done = true, doneBy = b.id, doneByName = "B", doneAtMs = 10, updatedAtMs = 10, editorId = b.id))
+        b.boot(); runCurrent()
+        for (p in listOf(a, b, c)) {
+            val got = p.sink.items["i1"]!!
+            assertTrue(p.name, got.done)
+            assertEquals(p.name, c.id, got.doneBy)
+        }
+    }
+
+    // ---- M4: status ----
+
+    private suspend fun Phone.status(state: MemberState, at: Long, note: String? = null) {
+        val s = StatusPayload(id, name, state, at, note)
+        sink.status(s)
+        engine.originate(ObjectType.STATUS, StatusPayload.objectId(id), at, WireCodec.encodePayload(s))
+    }
+
+    @Test fun needHelpReachesFarEndAndAlertsOnce() = runTest {
+        val (a, b, c) = line("A", "B", "C")
+        listOf(a, b, c).forEach { it.ttl = 1; it.boot() }
+        runCurrent()
+        c.status(MemberState.NEED_HELP, 5, "ankle")
+        runCurrent()
+        assertEquals("help is replicated state, not hop-limited", MemberState.NEED_HELP, a.sink.statuses[c.id]!!.state)
+        assertEquals(listOf(c.id to true), a.sink.helpEvents)
+        c.status(MemberState.OK, 9)
+        runCurrent()
+        assertEquals(listOf(c.id to true, c.id to false), a.sink.helpEvents)
+    }
+
+    @Test fun staleOkNeverOverwritesNewerNeedHelp() = runTest {
+        val (a, b) = line("A", "B")
+        a.boot(); b.boot()
+        runCurrent()
+        b.status(MemberState.NEED_HELP, 50)
+        runCurrent()
+        // An older OK still circulating (e.g. from a phone that was away) arrives late.
+        val stale = StatusPayload(b.id, "B", MemberState.OK, 40)
+        b.engine.originate(ObjectType.STATUS, StatusPayload.objectId(b.id), 40, WireCodec.encodePayload(stale))
+        runCurrent()
+        assertEquals(MemberState.NEED_HELP, a.sink.statuses[b.id]!!.state)
+    }
+
+    @Test fun nobodyCanSetSomeoneElsesStatus() = runTest {
+        val (a, b) = line("A", "B")
+        a.boot(); b.boot()
+        runCurrent()
+        val forged = StatusPayload(a.id, "A", MemberState.OK, 99)
+        b.engine.originate(ObjectType.STATUS, StatusPayload.objectId(a.id), 99, WireCodec.encodePayload(forged))
+        runCurrent()
+        assertNull(a.sink.statuses[a.id])
     }
 }

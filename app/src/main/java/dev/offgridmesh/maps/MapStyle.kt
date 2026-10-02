@@ -89,7 +89,8 @@ object MapStyle {
             JSONObject().put("id", NODE_LAYER).put("type", "circle").put("source", NODES)
                 .put(
                     "paint",
-                    JSONObject().put("circle-radius", 7).put("circle-color", "#00838f")
+                    JSONObject().put("circle-radius", JSONArray("""["case", ["get", "help"], 11, 7]"""))
+                        .put("circle-color", JSONArray("""["case", ["get", "help"], "#d32f2f", "#00838f"]"""))
                         .put("circle-stroke-color", "#ffffff").put("circle-stroke-width", 2)
                         .put("circle-opacity", JSONArray("""["case", ["get", "stale"], 0.4, 1.0]""")),
                 ),

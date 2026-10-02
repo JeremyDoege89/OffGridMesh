@@ -14,8 +14,8 @@ android {
         applicationId = "dev.offgridmesh"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.3.0-m3"
+        versionCode = 4
+        versionName = "0.4.0-m4"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -77,6 +77,7 @@ dependencies {
     implementation(libs.serialization.protobuf)
     implementation(libs.play.services.nearby)
     implementation(libs.maplibre)
+    implementation(libs.billing)
 
     testImplementation(libs.junit)
     testImplementation(libs.coroutines.test)

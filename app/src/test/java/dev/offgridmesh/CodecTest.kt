@@ -24,7 +24,7 @@ class CodecTest {
     @Test fun peerInfoTruncatesOnCodePointBoundary() {
         val long = "Ä".repeat(40) + "🔥"
         val bytes = PeerInfoCodec.encode(PeerInfo(id, long))
-        assertTrue(bytes.size <= 17 + PeerInfoCodec.MAX_NAME_BYTES)
+        assertTrue(bytes.size <= 21 + PeerInfoCodec.MAX_NAME_BYTES)
         val name = PeerInfoCodec.decode(bytes)!!.displayName
         assertEquals("Ä".repeat(16), name)
     }

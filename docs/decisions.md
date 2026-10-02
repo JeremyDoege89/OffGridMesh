@@ -19,7 +19,7 @@ Development proceeds on the guide's defaults until the owner rules. Silence is n
 ## Engineering decisions made in M2
 
 - **Gossip table is the relay queue.** No separate queue: anything with `outTtl > 0` a peer lacks is sent on
-  the next inventory exchange. Unknown object types are stored and relayed, so older builds carry newer data.
+  the next inventory exchange. A new object type in a later build is NOT relayed by older builds (unknown enum fails to decode): teams should update together.
 - **TTL semantics:** author sends ttl = setting; each relay forwards with ttl−1 and drops at 0 → TTL N = N hops.
 - **Inventory is capped** at the newest 2,000 relayable records (pages of 400 to fit Nearby's 32 KB BYTES
   payload). Older records still relay live but aren't backfilled.
@@ -50,3 +50,20 @@ Development proceeds on the guide's defaults until the owner rules. Silence is n
   itself keeps its own version until its clock is fixed.
 - **Location sharing is off by default**; toggle on the Map screen and in Settings.
 - **Pack download runs in an app-scoped coroutine** with the screen kept on, not a WorkManager job (M5).
+
+## Engineering decisions made in M4
+
+- **Crypto library:** platform JCA (PBKDF2WithHmacSHA256 + AES/GCM/NoPadding, API 26+) instead of Tink or
+  Lazysodium — standard primitives, no hand-rolled crypto, zero extra dependency. Construction in README.
+- **Encryption at the link layer:** the whole frame (headers included) is sealed per hop, so non-members
+  learn nothing but frame sizes. Relays re-seal because they change ttl/relays.
+- **Fixed salt** (every member must derive the same key from the passphrase alone): passphrase strength is
+  the protection; onboarding asks for 8+ characters and recommends four random words.
+- **Team tag in adverts** (PeerInfo v2): phones only connect within a team; M1–M3 builds (v1 adverts)
+  count as "different team". Every phone needs this build.
+- **Free node cap = roster display cap**, not a radio cap: members beyond 8 still relay and their messages,
+  pins and help calls arrive; the lists show "+N more". Help calls are never hidden. Auto paywall once per
+  run when a 9th member is active, deferred while anyone has an active help call.
+- **Help calls** may carry the caller's position (opt-in per call), shown as a red marker on teammates' maps.
+- **Billing:** ported from MaintenanceTracker (PBL 9.1, cache-first, Play authoritative, acks on every pass).
+  Product id `pro_unlock` must be created in Play Console.

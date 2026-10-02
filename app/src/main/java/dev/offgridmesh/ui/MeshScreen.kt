@@ -50,7 +50,14 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.google.android.gms.common.ConnectionResult
 import com.google.android.gms.common.GoogleApiAvailability
 import dev.offgridmesh.MeshApp
+import dev.offgridmesh.billing.ProFeature
+import dev.offgridmesh.billing.ProState
+import dev.offgridmesh.crypto.TeamMode
+import dev.offgridmesh.data.MemberStatusEntity
 import dev.offgridmesh.data.Node
+import dev.offgridmesh.sync.MemberState
+import kotlinx.coroutines.launch
+import androidx.compose.foundation.clickable
 import dev.offgridmesh.mesh.MeshConfig
 import dev.offgridmesh.mesh.MeshPermissions
 import dev.offgridmesh.mesh.MeshService
@@ -64,20 +71,33 @@ import kotlinx.coroutines.flow.stateIn
 data class MeshUi(
     val mesh: MeshState = MeshState(),
     val selfId: String = "",
+    val selfName: String = "",
     val nodes: List<Node> = emptyList(),
+    val statuses: List<MemberStatusEntity> = emptyList(),
+    val team: TeamMode? = null,
+    val pro: ProState = ProState.FREE,
 )
 
 class MeshViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as MeshApp
-    val ui = combine(app.meshState, app.identity.identity, app.db.nodes().observeAll()) { mesh, me, nodes ->
-        MeshUi(mesh, me.deviceId, nodes.filter { it.deviceId != me.deviceId })
+    val ui = combine(
+        combine(app.meshState, app.identity.identity, app.db.nodes().observeAll(), ::Triple),
+        app.status.observeAll(),
+        app.team.mode,
+        app.pro.status,
+    ) { (mesh, me, nodes), statuses, team, pro ->
+        MeshUi(mesh, me.deviceId, me.displayName, nodes.filter { it.deviceId != me.deviceId }, statuses, team, pro.state)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), MeshUi())
+
+    fun setStatus(state: MemberState, note: String?, lat: Double?, lng: Double?) =
+        viewModelScope.launch { app.status.set(state, note, lat, lng) }
 }
 
 /** Mesh home (§7.2): the toggle, honest node accounting, and the node list. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MeshScreen(onOpenSettings: () -> Unit, vm: MeshViewModel = viewModel()) {
+fun MeshScreen(onOpenSettings: () -> Unit, onChooseTeam: () -> Unit, vm: MeshViewModel = viewModel()) {
+    val app = LocalContext.current.applicationContext as MeshApp
     val context = LocalContext.current
     val ui by vm.ui.collectAsStateWithLifecycle()
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -106,6 +126,10 @@ fun MeshScreen(onOpenSettings: () -> Unit, vm: MeshViewModel = viewModel()) {
     }
 
     val running = ui.mesh.running
+    val teamChosen = ui.team != null && ui.team != TeamMode.Unset
+    val roster = buildRoster(ui.selfId, ui.selfName, ui.nodes, ui.statuses, ui.mesh, now)
+    val (visibleRoster, hiddenCount) = capRoster(roster, ui.pro)
+    val visibleIds = visibleRoster.map { it.deviceId }.toSet()
     val direct = ui.mesh.connectedDeviceIds
     val acct = nodeAccounting(ui.mesh, ui.nodes, now)
 
@@ -144,10 +168,48 @@ fun MeshScreen(onOpenSettings: () -> Unit, vm: MeshViewModel = viewModel()) {
                         }
                         Switch(
                             checked = running,
-                            enabled = canRun && playServicesOk,
+                            enabled = canRun && playServicesOk && teamChosen,
                             onCheckedChange = { on -> if (on) MeshService.start(context) else MeshService.stop(context) },
                         )
                     }
+                    // Padlock state is always visible (§10): open mesh must never look like the secure one.
+                    when (ui.team) {
+                        is TeamMode.Passphrase -> Text(
+                            "🔒 Team passphrase encryption",
+                            Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        TeamMode.Open -> Text(
+                            "🔓 Open mesh — anyone nearby with the app can read everything",
+                            Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+                            color = MaterialTheme.colorScheme.error,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        else -> Unit
+                    }
+                    Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp)) {
+                        OwnStatusControls(ui.statuses.firstOrNull { it.deviceId == ui.selfId }, running) { st, note, lat, lng ->
+                            vm.setStatus(st, note, lat, lng)
+                        }
+                    }
+                }
+            }
+
+            if (ui.team == TeamMode.Unset) {
+                item {
+                    Notice("Choose your team's security before turning the mesh on: a shared team passphrase, or an open mesh.") {
+                        Button(onClick = onChooseTeam, modifier = Modifier.heightIn(min = 48.dp)) { Text("Set up team") }
+                    }
+                }
+            }
+
+            if (ui.mesh.foreignNearby > 0) {
+                item {
+                    Notice(
+                        "${ui.mesh.foreignNearby} phone${if (ui.mesh.foreignNearby == 1) "" else "s"} nearby with the app " +
+                            "use a different team passphrase (or an older version), so they can't join this mesh. " +
+                            "Check everyone typed the same passphrase.",
+                    )
                 }
             }
 
@@ -213,8 +275,17 @@ fun MeshScreen(onOpenSettings: () -> Unit, vm: MeshViewModel = viewModel()) {
                 }
             }
 
-            items(ui.nodes, key = { it.deviceId }) { node ->
+            items(ui.nodes.filter { it.deviceId in visibleIds }, key = { it.deviceId }) { node ->
                 NodeRow(node, connected = node.deviceId in direct, now = now)
+            }
+            if (hiddenCount > 0) {
+                item {
+                    ListItem(
+                        modifier = Modifier.clickable { app.requestPaywall(ProFeature.NODES) },
+                        headlineContent = { Text("+$hiddenCount more members") },
+                        supportingContent = { Text("Free shows 8 members. Their messages, pins and help calls still arrive. Tap for Pro.") },
+                    )
+                }
             }
         }
     }

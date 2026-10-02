@@ -26,10 +26,14 @@ data class Peer(
 data class MeshState(
     val running: Boolean = false,
     val peers: Map<String, Peer> = emptyMap(),
+    /** endpointId → deviceId of app phones nearby on a different team passphrase (or older build): never joined. */
+    val foreign: Map<String, String> = emptyMap(),
+    val encrypted: Boolean = false,
 ) {
     val connectedDeviceIds: Set<String>
         get() = peers.values.filter { it.connected }.mapNotNullTo(mutableSetOf()) { it.info?.deviceId }
     val connectedCount: Int get() = connectedDeviceIds.size
+    val foreignNearby: Int get() = foreign.values.toSet().size
 }
 
 /** Where MeshCore records who it has heard from (the Node table in the app, a fake in tests). */
@@ -66,10 +70,11 @@ class MeshCore(
 
     private val peers get() = _state.value.peers
 
-    fun start(self: PeerInfo) {
+    /** [self].teamTag decides who we join; [encrypted] is shown in the UI's padlock. */
+    fun start(self: PeerInfo, encrypted: Boolean = false) {
         if (_state.value.running) return
         this.self = self
-        _state.value = MeshState(running = true)
+        _state.value = MeshState(running = true, encrypted = encrypted)
         jobs = listOf(
             scope.launch { transport.events.collect { handle(it) } },
             scope.launch {
@@ -88,6 +93,14 @@ class MeshCore(
         jobs = emptyList()
         transport.stop()
         _state.value = MeshState(running = false)
+    }
+
+    private fun sameTeam(info: PeerInfo?) = info != null && info.teamTag != null && info.teamTag == self?.teamTag
+
+    private fun setForeign(endpointId: String, deviceId: String?) {
+        val s = _state.value
+        val next = if (deviceId != null) s.foreign + (endpointId to deviceId) else s.foreign - endpointId
+        if (next != s.foreign) _state.value = s.copy(foreign = next)
     }
 
     /** Name used in connection requests from now on (adverts pick it up next session). */
@@ -117,12 +130,19 @@ class MeshCore(
             is TransportEvent.Discovered -> {
                 val info = e.info ?: return // not ours or incompatible version: ignore, never connect
                 if (info.deviceId == self?.deviceId) return
+                if (!sameTeam(info)) {
+                    // Another team (or an older build): count it so the UI can say so, but never join it.
+                    setForeign(e.endpointId, info.deviceId)
+                    return
+                }
+                setForeign(e.endpointId, null)
                 put(peers[e.endpointId]?.copy(info = info) ?: Peer(e.endpointId, info, discoveredAtMs = now))
                 nodes.recordContact(info.deviceId, info.displayName, now, hopCount = 0, batteryPct = null)
                 maybeConnect(e.endpointId, now)
             }
 
             is TransportEvent.Lost -> {
+                setForeign(e.endpointId, null)
                 val p = peers[e.endpointId] ?: return
                 if (!p.connected && !p.connecting) remove(e.endpointId)
             }
@@ -130,6 +150,13 @@ class MeshCore(
             is TransportEvent.Connected -> {
                 val p = peers[e.endpointId] ?: Peer(e.endpointId, e.info, discoveredAtMs = now)
                 val info = p.info ?: e.info
+                if (!sameTeam(e.info ?: info)) {
+                    // An inbound connection from another team: drop it; nothing is exchanged.
+                    (e.info ?: info)?.let { setForeign(e.endpointId, it.deviceId) }
+                    remove(e.endpointId)
+                    transport.disconnect(e.endpointId)
+                    return
+                }
                 put(p.copy(info = info, connected = true, connecting = false))
                 info?.let { nodes.recordContact(it.deviceId, it.displayName, now, hopCount = 0, batteryPct = null) }
                 listener?.onConnected(e.endpointId)

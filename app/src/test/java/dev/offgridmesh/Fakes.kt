@@ -57,6 +57,14 @@ internal class FakeRadio(val air: FakeAir, val endpointName: String) : MeshTrans
 
     override fun refreshDiscovery() { known.clear(); air.announce() }
 
+    override fun disconnect(endpointId: String) {
+        val other = peer(endpointId)
+        val link = air.links.firstOrNull { it == this to other || it == other to this } ?: return
+        air.links -= link
+        ch.trySend(TransportEvent.Disconnected(endpointId))
+        other.ch.trySend(TransportEvent.Disconnected(endpointName))
+    }
+
     override fun connect(endpointId: String) {
         air.requests++
         val other = peer(endpointId)

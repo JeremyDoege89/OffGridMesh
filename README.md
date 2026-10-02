@@ -12,7 +12,7 @@ Owner decisions: `docs/decisions.md`.
 |---|---|---|
 | M1 | Nearby transport behind `MeshTransport`, foreground `MeshService`, node list | Done; two phones connected in the field (formal timings not measured). |
 | M2 | Chat, store-and-forward, TTL relay, message states | 2-phone field test passed (queued→delivered, receipts). **3-phone A–B–C relay not run.** |
-| M3 | Offline maps (MapLibre + MBTiles) + pins | Code done; JVM + device tests pass. On-phone pack download / pin sync not yet field-tested. |
+| M3 | Offline maps (MapLibre + MBTiles) + pins | Done on one phone: pack download, offline render, GPS pin. Pin sync to a 2nd phone + true airplane-mode run not yet done. |
 | M4 | Checklists, status board, passphrase encryption, paywall | — |
 | M5 | Battery/Doze tuning, billing edge cases, release | — |
 

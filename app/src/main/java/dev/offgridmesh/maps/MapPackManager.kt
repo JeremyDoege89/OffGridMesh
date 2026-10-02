@@ -82,47 +82,67 @@ class HttpRangeSource(private val url: String) : RangeSource {
     }
 }
 
-/** MBTiles 1.3 writer (TMS row order), the on-disk pack format MapLibre reads via mbtiles://. */
+/**
+ * MBTiles 1.3 writer (TMS row order), the on-disk pack format MapLibre reads via mbtiles://.
+ *
+ * Android ties a SQLite transaction to the thread that began it, and the extractor calls [put] from
+ * whichever IO thread finished a range — so rows are buffered and each batch is begun, written and
+ * committed inside a single call. (Holding one transaction open across calls deadlocks.)
+ */
 class MbtilesWriter(file: File) : TileSink {
     private val db = SQLiteDatabase.openOrCreateDatabase(file, null)
-    private var pending = 0
+    private val buffer = ArrayList<ContentValues>(BATCH)
 
     init {
         db.execSQL("CREATE TABLE metadata (name TEXT, value TEXT)")
         db.execSQL("CREATE TABLE tiles (zoom_level INTEGER, tile_column INTEGER, tile_row INTEGER, tile_data BLOB)")
         db.execSQL("CREATE UNIQUE INDEX tile_index ON tiles (zoom_level, tile_column, tile_row)")
-        db.beginTransaction()
     }
 
+    @Synchronized
     override fun put(z: Int, x: Int, y: Int, data: ByteArray) {
-        db.insertWithOnConflict(
-            "tiles", null,
-            ContentValues().apply {
-                put("zoom_level", z)
-                put("tile_column", x)
-                put("tile_row", (1 shl z) - 1 - y)
-                put("tile_data", data)
-            },
-            SQLiteDatabase.CONFLICT_REPLACE,
-        )
-        if (++pending >= 2_000) {
-            db.setTransactionSuccessful()
-            db.endTransaction()
-            db.beginTransaction()
-            pending = 0
+        buffer += ContentValues().apply {
+            put("zoom_level", z)
+            put("tile_column", x)
+            put("tile_row", (1 shl z) - 1 - y)
+            put("tile_data", data)
         }
+        if (buffer.size >= BATCH) flush()
     }
 
+    private fun flush() {
+        if (buffer.isEmpty()) return
+        db.beginTransaction()
+        try {
+            buffer.forEach { db.insertWithOnConflict("tiles", null, it, SQLiteDatabase.CONFLICT_REPLACE) }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        buffer.clear()
+    }
+
+    @Synchronized
     fun finish(metadata: Map<String, String>) {
-        metadata.forEach { (k, v) -> db.insert("metadata", null, ContentValues().apply { put("name", k); put("value", v) }) }
-        db.setTransactionSuccessful()
-        db.endTransaction()
+        flush()
+        db.beginTransaction()
+        try {
+            metadata.forEach { (k, v) -> db.insert("metadata", null, ContentValues().apply { put("name", k); put("value", v) }) }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
         db.close()
     }
 
+    @Synchronized
     fun abort() {
-        if (db.inTransaction()) db.endTransaction()
+        buffer.clear()
         db.close()
+    }
+
+    private companion object {
+        const val BATCH = 500
     }
 }
 
@@ -139,7 +159,11 @@ sealed interface PackJob {
 
 /** Downloads, lists and deletes offline map packs (§6). One job at a time; app-scoped so it survives screens. */
 class MapPackManager(context: Context, private val dao: MapPackDao) {
-    private val dir = File(context.filesDir, "maps").apply { mkdirs() }
+    private val dir = File(context.filesDir, "maps").apply {
+        mkdirs()
+        // A download interrupted by process death leaves a partial file; nothing can resume it.
+        listFiles { f -> f.name.contains(".mbtiles.part") }?.forEach { it.delete() } // incl. -journal
+    }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val _job = MutableStateFlow<PackJob>(PackJob.Idle)
     val job: StateFlow<PackJob> = _job.asStateFlow()
@@ -207,6 +231,7 @@ class MapPackManager(context: Context, private val dao: MapPackDao) {
                 writer = null
                 val final = File(dir, "$id.mbtiles")
                 if (!part.renameTo(final)) throw IOException("rename failed")
+                File(dir, part.name + "-journal").delete()
                 dao.insert(
                     MapPack(
                         id = id, name = ready.name, fileName = final.name, sizeBytes = final.length(),
@@ -219,12 +244,14 @@ class MapPackManager(context: Context, private val dao: MapPackDao) {
             } catch (e: CancellationException) {
                 writer?.abort()
                 part.delete()
+                File(dir, part.name + "-journal").delete()
                 _job.value = PackJob.Idle
                 throw e
             } catch (e: Exception) {
                 Log.w(TAG, "download failed", e)
                 writer?.abort()
                 part.delete()
+                File(dir, part.name + "-journal").delete()
                 _job.value = PackJob.Failed("The download stopped (${e.message ?: "network error"}). Try again on Wi-Fi.")
             }
         }
